@@ -1,0 +1,16 @@
+[Unit]
+Description=mcbuildai Minecraft build timelapse automation
+After=graphical-session.target network-online.target
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+WorkingDirectory=__DIR__
+EnvironmentFile=-%h/.config/mcbuildai.env
+Environment=DISPLAY=:0
+ExecStart=__DIR__/.venv/bin/python -m mcbuildai run
+Restart=always
+RestartSec=20
+
+[Install]
+WantedBy=graphical-session.target

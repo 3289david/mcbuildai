@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>mcbuildai 관리자</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<aside id="nav">
+  <div class="brand">mcbuildai<span>건축 타임랩스 자동 제작</span></div>
+  <nav>
+    <a data-view="dashboard">Dashboard<small>전체 제작 현황</small></a>
+    <a data-view="studio">AI Studio<small>건축물 생성 및 설정</small></a>
+    <a data-view="build">Build Manager<small>건축 작업 관리</small></a>
+    <a data-view="camera">Camera Studio<small>촬영 설정</small></a>
+    <a data-view="video">Video Editor<small>영상 편집 설정</small></a>
+    <a data-view="music">Music Studio<small>음악 및 효과음</small></a>
+    <a data-view="upload">Upload Manager<small>YouTube 업로드</small></a>
+    <a data-view="schedule">Schedule<small>예약 및 일정</small></a>
+    <a data-view="history">History<small>과거 제작 내역</small></a>
+    <a data-view="analytics">Analytics<small>조회수 및 성과</small></a>
+    <a data-view="settings">Settings<small>전체 설정</small></a>
+    <a data-view="logs">Logs<small>오류 및 시스템 기록</small></a>
+  </nav>
+</aside>
+<main>
+  <header><h1 id="title"></h1><div id="clock"></div></header>
+  <section id="view"></section>
+</main>
+<div id="toast"></div>
+<script src="/static/app.js"></script>
+</body>
+</html>

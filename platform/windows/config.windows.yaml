@@ -1,0 +1,165 @@
+# mcbuildai 설정 (windows)
+# 반드시 바꿔야 하는 값
+#   server.rcon_password      : 아무 긴 문자열 (서버 RCON 비밀번호로 자동 기록됨)
+#   client.camera_player      : 촬영용 Minecraft 계정 닉네임 (정품 계정)
+#   client.launch_command     : Minecraft 클라이언트 실행 명령 (예: Prism Launcher)
+#   client.game_dir           : 그 인스턴스의 .minecraft 폴더 (셰이더/리소스팩 자동 설정용)
+# 환경 변수
+#   ANTHROPIC_API_KEY         : genMC 설계 에이전트, AI 기획/제목 생성에 사용
+#   JAMENDO_CLIENT_ID         : (선택) Jamendo 음악 자동 수집
+#   FREESOUND_API_KEY         : (선택) Freesound 효과음 자동 수집
+#   YOUTUBE_API_KEY           : (선택) 인기 트렌드 분석
+#   Prism 예) "C:\\Users\\<사용자>\\AppData\\Local\\Programs\\PrismLauncher\\prismlauncher.exe" -l BuildCam -s 127.0.0.1:25565
+
+paths:
+  data_dir: data
+  output_dir: output
+  schematic_dir: output/schematics
+  music_dir: assets/music
+  sfx_dir: assets/sfx
+  font_file: C:/Windows/Fonts/malgunbd.ttf
+  ffmpeg: ''
+  ffprobe: ''
+content:
+  language: en
+  localize_ko: true
+generator:
+  engine: auto
+genmc:
+  mcp_url: https://genmc.app/api/mcp
+  export_version: 1.21.1
+planner:
+  horizon_days: 7
+  lunar_dates:
+    seollal:
+    - '2026-02-17'
+    - '2027-02-07'
+    - '2028-01-27'
+    - '2029-02-13'
+    - '2030-02-03'
+    chuseok:
+    - '2026-09-25'
+    - '2027-09-15'
+    - '2028-10-03'
+    - '2029-09-22'
+    - '2030-09-12'
+camera:
+  mode: display
+  auto_hide_hud: true
+  multi_env: true
+audio:
+  allowed_licenses:
+  - CC0
+  - PDM
+  - CC-BY
+  - YouTube Audio Library
+  - Owned
+  - Self-made
+  - AI-generated-owned
+  auto_fetch: true
+  min_tracks_per_mood: 3
+  min_sfx_per_kind: 3
+  music_min_sec: 60
+  music_max_sec: 420
+  sources:
+  - openverse
+  - jamendo
+  - freesound
+  jamendo_client_id_env: JAMENDO_CLIENT_ID
+  freesound_token_env: FREESOUND_API_KEY
+server:
+  dir: server
+  jar: paper.jar
+  java: java
+  memory: 4G
+  host: 127.0.0.1
+  rcon_port: 25575
+  rcon_password: ''
+  world_name: buildworld
+  start_timeout_sec: 180
+  backup_dir: data/backups
+  keep_backups: 5
+client:
+  launch_command: ''
+  camera_player: ''
+  window_title: Minecraft
+  game_dir: ''
+  startup_wait_sec: 60
+capture:
+  fps: 30
+  width: 1920
+  height: 1080
+  display: :0.0
+  offset_x: 0
+  offset_y: 0
+  windows_source: desktop
+  encoder: libx264
+  crf: 18
+build:
+  origin:
+  - 0
+  - 64
+  - 0
+  blocks_per_second: 400
+  max_commands_per_batch: 200
+  verify: true
+  verify_sample: 0.25
+  min_build_sec: 60
+  max_build_sec: 1800
+  plot_spacing: 200
+video:
+  short_max_sec: 58
+  edited_width: 1080
+  edited_height: 1920
+  raw_keep_aspect: true
+  preset: veryfast
+  crf: 20
+  music_volume: 0.6
+  sfx_volume: 0.9
+  target_lufs: -14
+  raw_build_sec: 90
+  beat_sync: true
+  block_counter: true
+  speed_label: true
+  hook_text: true
+  cta_text: true
+  motion_blur: true
+  loop_end: true
+  landscape_edit: true
+  landscape_max_sec: 90
+  cleanup_tmp: true
+ai:
+  provider: anthropic
+  model: claude-sonnet-5-5
+  api_key_env: ANTHROPIC_API_KEY
+music_api:
+  endpoint: ''
+  api_key_env: MUSIC_API_KEY
+youtube:
+  client_secrets: data/client_secret.json
+  token_file: data/youtube_token.json
+  privacy: private
+  category_id: '20'
+  default_language: en
+  api_key_env: YOUTUBE_API_KEY
+  trend_queries:
+  - minecraft build timelapse
+  - minecraft building shorts
+  upload_landscape: false
+  schedule_times:
+  - '18:00'
+  timezone: Asia/Seoul
+  auto_upload: false
+jobs:
+  daily_count: 1
+  max_retries: 3
+  workers: 1
+  min_free_disk_gb: 20
+  cleanup_days: 30
+  daily_time: 09:00
+  experiment_every: 5
+notify:
+  discord_webhook: ''
+dashboard:
+  host: 127.0.0.1
+  port: 8765
