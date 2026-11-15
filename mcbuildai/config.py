@@ -161,6 +161,7 @@ DEFAULTS: dict[str, Any] = {
         "cleanup_days": 30,
         "daily_time": "09:00",         # 매일 작업 생성 시각
         "experiment_every": 5,         # N 번째 작업마다 A/B 편집 실험
+        "online_backlog_target": 8,    # 촬영 에이전트가 켜져 있을 때 이 개수까지 미리 찍어서 쌓아둔다
     },
     "notify": {
         "discord_webhook": "",

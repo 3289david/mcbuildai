@@ -145,6 +145,31 @@ class Scheduler:
         self._periodic("trends_at", 24 * 3600, self._trends)
         if self.cfg.get("audio.auto_fetch", True):
             self._periodic("audio_fetch_at", 7 * 24 * 3600, self._audio)
+        self._periodic("burst_at", 60, self._burst_while_online)
+
+    def _burst_while_online(self) -> None:
+        """Windows PC(촬영 에이전트)가 켜져 있을 때만 촬영이 가능하므로, 그 기회를 최대한
+        활용한다: 에이전트가 온라인인 동안은 하루 1개 일정과 무관하게 대기열을 계속 채워서
+        w0 가 쉬지 않고 계속 촬영하게 하고, 완성된 영상은 업로드만 평소 일정(짧은 영상 매일,
+        롱폼 N일마다)대로 예약해서 올린다 - "찍을 수 있을 때 최대한 찍어서 쌓아두고, 올리는
+        건 원래 일정대로" 요청에 따른 것."""
+        from mcbuildai.jobs.agent_hub import HUB
+        if not HUB.is_online(float(self.cfg.get("agent.heartbeat_timeout_sec", 25))):
+            return
+        target = int(self.cfg.get("jobs.online_backlog_target", 8))
+        pending = self.db.one("SELECT COUNT(*) AS n FROM jobs WHERE stage != 'done'")["n"]
+        if pending >= target:
+            return
+        from mcbuildai.planner.planner import Planner
+        planner = Planner(self.cfg, self.db)
+        rng = random.Random()
+        made = 0
+        for _ in range(target - pending):
+            plan = planner.plan_day(date.today(), rng)
+            create_job(self.db, plan.to_json(), priority=6)
+            made += 1
+        if made:
+            self.db.log("INFO", "scheduler", f"에이전트 온라인 - 대기열 채우기용 작업 {made}개 생성 (목표 {target})")
 
     def _periodic(self, key: str, every: int, fn) -> None:
         last = float(self.db.kv_get(key, 0))
