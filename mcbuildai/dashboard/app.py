@@ -1,6 +1,8 @@
 """관리자 대시보드 (FastAPI). 모든 수치는 DB, 파일 시스템, 운영체제에서 읽은 실제 값만 표시한다."""
 from __future__ import annotations
 
+import hmac
+import hashlib
 import json
 import random
 import shutil
@@ -17,11 +19,76 @@ from mcbuildai.db import DB, now_iso
 
 STATIC = Path(__file__).parent / "static"
 SECRET_KEYS = {("server", "rcon_password")}
+SESSION_COOKIE = "mcb_session"
+SESSION_MAX_AGE = 400 * 24 * 3600  # 400일 (브라우저가 허용하는 쿠키 수명 상한에 가깝게)
 
 
 def create_app(cfg: Config, db: DB) -> FastAPI:
     app = FastAPI(title="mcbuildai 관리자")
     allowed_roots = [cfg.path_of("paths.output_dir").resolve(), cfg.path_of("paths.data_dir").resolve()]
+
+    # ---------------- 로그인 (쿠키 세션, nginx Basic Auth 대신) ----------------
+    # Basic Auth 는 브라우저/기기마다 다시 물어보는 경우가 많아서 매번 로그인해야 하는 게 불편했다.
+    # 대신 로그인 한 번으로 400일짜리 서명된 쿠키를 심어서 그 뒤로는 다시 묻지 않는다.
+    def _session_secret() -> str:
+        s = cfg.get("dashboard.session_secret")
+        if not s:
+            raise HTTPException(500, "dashboard.session_secret 이 설정되지 않았습니다")
+        return s
+
+    def _sign(exp: int) -> str:
+        mac = hmac.new(_session_secret().encode(), f"ok:{exp}".encode(), hashlib.sha256).hexdigest()
+        return f"{exp}.{mac}"
+
+    def _valid_session(token: str | None) -> bool:
+        if not token or "." not in token:
+            return False
+        exp_s, _, mac = token.partition(".")
+        try:
+            exp = int(exp_s)
+        except ValueError:
+            return False
+        if exp < time.time():
+            return False
+        expected = hmac.new(_session_secret().encode(), f"ok:{exp}".encode(), hashlib.sha256).hexdigest()
+        return hmac.compare_digest(mac, expected)
+
+    LOGIN_EXEMPT_PREFIXES = ("/api/agent/", "/login")
+
+    @app.middleware("http")
+    async def require_login(request: Request, call_next):
+        path = request.url.path
+        if path.startswith(LOGIN_EXEMPT_PREFIXES) or _valid_session(request.cookies.get(SESSION_COOKIE)):
+            return await call_next(request)
+        if path.startswith("/api/") or path == "/files":
+            return JSONResponse({"detail": "로그인이 필요합니다"}, status_code=401)
+        return RedirectResponse(f"/login?next={path}", status_code=302)
+
+    @app.get("/login", response_class=HTMLResponse)
+    def login_page(error: str | None = None):
+        msg = '<p style="color:#c33">비밀번호가 틀렸습니다.</p>' if error else ""
+        return f"""<!doctype html><html><body style="font-family:sans-serif;max-width:360px;margin:80px auto">
+        <h2>mcbuildai 로그인</h2>{msg}
+        <form method="post" action="/login">
+          <input name="password" type="password" placeholder="비밀번호" autofocus
+                 style="width:100%;padding:8px;font-size:16px;box-sizing:border-box">
+          <button style="width:100%;padding:8px;margin-top:8px;font-size:16px">로그인</button>
+        </form></body></html>"""
+
+    @app.post("/login")
+    def login_submit(password: str = Form(...), next: str = "/"):
+        if not hmac.compare_digest(password, str(cfg.get("dashboard.password", ""))):
+            return RedirectResponse("/login?error=1", status_code=302)
+        exp = int(time.time()) + SESSION_MAX_AGE
+        resp = RedirectResponse(next or "/", status_code=302)
+        resp.set_cookie(SESSION_COOKIE, _sign(exp), max_age=SESSION_MAX_AGE, httponly=True, samesite="lax")
+        return resp
+
+    @app.get("/logout")
+    def logout():
+        resp = RedirectResponse("/login", status_code=302)
+        resp.delete_cookie(SESSION_COOKIE)
+        return resp
 
     def _bg(name: str, fn, *a, **kw):
         def run():

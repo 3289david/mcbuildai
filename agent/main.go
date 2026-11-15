@@ -420,14 +420,20 @@ func ensureFFmpeg() {
 
 func apiURL(path string) string { return strings.TrimRight(cfg.ServerURL, "/") + path }
 
-func heartbeat() {
+func heartbeat() bool {
 	body, _ := json.Marshal(map[string]string{"token": cfg.Token})
 	resp, err := http.Post(apiURL("/api/agent/heartbeat"), "application/json", bytes.NewReader(body))
 	if err != nil {
-		fmt.Println("하트비트 실패:", err)
-		return
+		fmt.Println("하트비트 실패:", err, "- 5초 후 재시도")
+		return false
 	}
-	resp.Body.Close()
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		body, _ := io.ReadAll(resp.Body)
+		fmt.Println("하트비트 거부됨 (", resp.StatusCode, "):", string(body))
+		return false
+	}
+	return true
 }
 
 func poll() []Command {
@@ -594,10 +600,20 @@ func main() {
 	fmt.Println(">>> 준비 완료! 서버에 연결합니다:", cfg.ServerURL)
 
 	lastHeartbeat := time.Now().Add(-time.Hour)
+	lastStatusPrint := time.Now().Add(-time.Hour)
+	wasOnline := false
 	for {
 		if time.Since(lastHeartbeat) > 10*time.Second {
-			heartbeat()
+			ok := heartbeat()
 			lastHeartbeat = time.Now()
+			if ok && !wasOnline {
+				fmt.Println(">>> 서버 연결됨. 명령을 기다립니다. (이 창을 열어두세요)")
+			}
+			wasOnline = ok
+		}
+		if wasOnline && time.Since(lastStatusPrint) > 60*time.Second {
+			fmt.Println("... 정상 작동 중 (", time.Now().Format("15:04:05"), ")")
+			lastStatusPrint = time.Now()
 		}
 		for _, c := range poll() {
 			fmt.Println("명령 수신:", c.Type, c.Name)

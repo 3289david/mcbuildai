@@ -168,6 +168,8 @@ DEFAULTS: dict[str, Any] = {
     "dashboard": {
         "host": "127.0.0.1",
         "port": 8765,
+        "password": None,          # 로그인 비밀번호 (config.yaml 에서 설정 필수)
+        "session_secret": None,    # 로그인 쿠키 서명용 비밀키 (config.yaml 에서 설정 필수)
     },
 }
 
