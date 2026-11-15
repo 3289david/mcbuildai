@@ -242,27 +242,61 @@ func prismDataDir() string {
 	return filepath.Dir(cfg.PrismPath)
 }
 
+// ---------------- 부트스트랩: Java 런타임 ----------------
+// Prism 자체가 실행되는 건 Java 와 무관하지만, 실제 마인크래프트(Fabric)를 켜려면 JRE 가 있어야
+// 한다. 없으면 Prism 이 설정 대화상자를 띄우거나 조용히 실패해서, Prism 프로세스는 뜨는데
+// 플레이어는 영원히 서버에 접속 못 하는 상태가 된다 (겉보기로는 "실행 성공"처럼 보여서 더 헷갈림).
+// Prism 의 자동 Java 다운로드 기능에 맡기지 않고 우리가 직접 받아서 인스턴스에 고정 지정한다.
+
+func ensureJava() string {
+	javaw := filepath.Join(exeDir, "jre", "bin", "javaw.exe")
+	if _, err := os.Stat(javaw); err == nil {
+		return javaw
+	}
+	fmt.Println(">>> Java 런타임이 없어서 자동으로 설치합니다...")
+	zipPath := filepath.Join(os.TempDir(), "jre.zip")
+	must(downloadFile("https://api.adoptium.net/v3/binary/latest/21/ga/windows/x64/jre/hotspot/normal/eclipse", zipPath))
+	jreDir := filepath.Join(exeDir, "jre")
+	os.MkdirAll(jreDir, 0755)
+	must(unzip(zipPath, jreDir))
+	os.Remove(zipPath)
+	found := findFile(jreDir, "javaw.exe")
+	if found == "" {
+		must(fmt.Errorf("압축 해제 후 javaw.exe 를 찾지 못했습니다"))
+	}
+	fmt.Println(">>> Java 설치 완료:", found)
+	return found
+}
+
 // ---------------- 부트스트랩: BuildCam 인스턴스 ----------------
 
-func ensureInstance() {
+func ensureInstance(javaPath string) {
 	instDir := filepath.Join(prismDataDir(), "instances", cfg.Instance)
-	cfgPath := filepath.Join(instDir, "instance.cfg")
-	if _, err := os.Stat(cfgPath); err == nil {
-		return
-	}
-	fmt.Println(">>> 마인크래프트 인스턴스를 만듭니다:", cfg.Instance)
 	os.MkdirAll(filepath.Join(instDir, ".minecraft"), 0755)
-	instanceCfg := "[General]\nConfigVersion=1.2\nInstanceType=OneSix\nname=" + cfg.Instance + "\niconKey=default\n"
-	must(os.WriteFile(cfgPath, []byte(instanceCfg), 0644))
-	mmcPack := `{
+	// 항상 다시 써서 Java 경로 지정이 기존에 이미 만들어진 인스턴스에도 적용되게 한다
+	// (처음에 instance.cfg 가 있으면 건너뛰던 방식이라, Java 를 나중에 추가해도 기존 설치엔
+	// 반영이 안 되는 문제가 있었다).
+	javaForIni := strings.ReplaceAll(javaPath, `\`, "/")
+	instanceCfg := "[General]\nConfigVersion=1.2\nInstanceType=OneSix\nname=" + cfg.Instance +
+		"\niconKey=default\nOverrideJavaLocation=true\nJavaPath=" + javaForIni + "\n"
+	wasNew := true
+	if _, err := os.Stat(filepath.Join(instDir, "instance.cfg")); err == nil {
+		wasNew = false
+	}
+	must(os.WriteFile(filepath.Join(instDir, "instance.cfg"), []byte(instanceCfg), 0644))
+	if wasNew {
+		mmcPack := `{
   "components": [
     {"important": true, "uid": "net.minecraft", "version": "1.21.1"},
     {"uid": "net.fabricmc.fabric-loader", "version": "0.20.1"}
   ],
   "formatVersion": 1
 }`
-	must(os.WriteFile(filepath.Join(instDir, "mmc-pack.json"), []byte(mmcPack), 0644))
-	fmt.Println(">>> 인스턴스 생성 완료")
+		must(os.WriteFile(filepath.Join(instDir, "mmc-pack.json"), []byte(mmcPack), 0644))
+		fmt.Println(">>> 인스턴스 생성 완료")
+	} else {
+		fmt.Println(">>> 인스턴스 Java 경로 갱신 완료")
+	}
 }
 
 // ---------------- 부트스트랩: 마이크로소프트 계정 로그인 ----------------
@@ -610,7 +644,8 @@ func main() {
 	fmt.Println("=== mcbuildai 촬영 에이전트 ===")
 	ensureAutostart()
 	ensurePrism()
-	ensureInstance()
+	javaPath := ensureJava()
+	ensureInstance(javaPath)
 	ensureAccount()
 	ensureFFmpeg()
 	fmt.Println()
