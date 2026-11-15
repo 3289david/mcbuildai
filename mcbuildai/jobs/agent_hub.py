@@ -17,13 +17,23 @@ class AgentHub:
         self._last_heartbeat = 0.0
         self._pending: list[dict] = []
         self._results: dict[str, dict] = {}
+        self.last_ip: str | None = None     # 진단용: 마지막으로 heartbeat/poll 을 보낸 IP
+        self.seen_ips: dict[str, float] = {}  # 진단용: 지금까지 본 모든 IP와 마지막 접속 시각
+                                              # (여러 IP가 섞여 보이면 중복 실행된 에이전트가 있다는 뜻)
 
     def is_online(self, timeout: float = 25.0) -> bool:
         return (time.time() - self._last_heartbeat) < timeout
 
-    def heartbeat(self) -> None:
+    def _note_ip(self, ip: str | None) -> None:
+        if not ip:
+            return
+        self.last_ip = ip
+        self.seen_ips[ip] = time.time()
+
+    def heartbeat(self, ip: str | None = None) -> None:
         with self._lock:
             self._last_heartbeat = time.time()
+            self._note_ip(ip)
 
     def push_command(self, cmd: dict) -> str:
         cid = uuid.uuid4().hex
@@ -32,13 +42,15 @@ class AgentHub:
             self._pending.append(cmd)
         return cid
 
-    def drain(self) -> list[dict]:
+    def drain(self, ip: str | None = None) -> list[dict]:
         with self._lock:
+            self._note_ip(ip)
             items, self._pending = self._pending, []
             return items
 
-    def ack(self, cid: str, result: dict) -> None:
+    def ack(self, cid: str, result: dict, ip: str | None = None) -> None:
         with self._lock:
+            self._note_ip(ip)
             self._results[cid] = result
 
     def wait_result(self, cid: str, timeout: float = 60.0) -> dict:

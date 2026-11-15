@@ -264,6 +264,7 @@ def create_app(cfg: Config, db: DB) -> FastAPI:
             "exe_download_url": f"/files?path={exe_path}" if exe_path.is_file() else None,
             "exe_built_at": datetime.fromtimestamp(exe_path.stat().st_mtime).isoformat()
                            if exe_path.is_file() else None,
+            "seen_ips": {ip: datetime.fromtimestamp(ts).isoformat() for ip, ts in HUB.seen_ips.items()},
         }
 
     # ---------------- Build Manager ----------------
@@ -540,22 +541,30 @@ def create_app(cfg: Config, db: DB) -> FastAPI:
         if not token or token != cfg.get("agent.token"):
             raise HTTPException(401, "잘못된 에이전트 토큰입니다")
 
+    def _req_ip(request: Request) -> str:
+        # Cloudflare 가 실제 접속자 IP를 이 헤더로 넣어준다 (nginx 가 X-Forwarded-For 를
+        # /api/agent/ 경로엔 안 넘겨주므로 이걸로 봄). 여러 IP가 번갈아 보이면 Windows
+        # 에이전트가 두 군데(PC) 이상에서 동시에 실행 중이라는 뜻.
+        return request.headers.get("cf-connecting-ip") or (request.client.host if request.client else "?")
+
     @app.post("/api/agent/heartbeat")
-    def agent_heartbeat(token: str = Body(..., embed=True)):
+    def agent_heartbeat(request: Request, token: str = Body(..., embed=True)):
         _check_agent_token(token)
-        HUB.heartbeat()
+        HUB.heartbeat(_req_ip(request))
         return {"ok": True}
 
     @app.get("/api/agent/poll")
-    def agent_poll(token: str):
+    def agent_poll(request: Request, token: str):
         _check_agent_token(token)
-        HUB.heartbeat()
-        return {"commands": HUB.drain()}
+        HUB.heartbeat(_req_ip(request))
+        return {"commands": HUB.drain(_req_ip(request))}
 
     @app.post("/api/agent/ack")
-    def agent_ack(token: str = Body(...), id: str = Body(...), result: dict = Body({})):
+    def agent_ack(request: Request, token: str = Body(...), id: str = Body(...), result: dict = Body({})):
         _check_agent_token(token)
-        HUB.ack(id, result)
+        ip = _req_ip(request)
+        HUB.ack(id, result, ip)
+        db.log("INFO", "agent", f"에이전트 ack ({ip}): {id} -> {result}")
         return {"ok": True}
 
     @app.post("/api/agent/upload")
