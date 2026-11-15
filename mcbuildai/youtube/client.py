@@ -69,20 +69,32 @@ def _analytics(cfg: Config):
     return build("youtubeAnalytics", "v2", credentials=_creds(cfg), cache_discovery=False)
 
 
-def next_publish_time(cfg: Config, db: DB) -> datetime:
-    """예약 업로드 시각: 설정된 시각 중 이미 예약되지 않은 가장 가까운 미래 슬롯."""
+# 요일(평일/주말) x 영상 종류(쇼츠/롱폼)별 미국 동부 시간(EST/EDT) 추천 업로드 시각.
+# 숏츠: 평일 점심시간대(오후 12~3시) 중 피크, 주말 오전(9~11시) 중 피크.
+# 롱폼: 평일 오후(2~6시, 특히 3~4시가 가장 추천) 중 피크, 주말(오전 9시~오후 6시) 중 피크.
+SCHEDULE_BY_TYPE = {
+    "short": {"weekday": "13:00", "weekend": "10:00"},
+    "long": {"weekday": "15:30", "weekend": "11:00"},
+}
+
+
+def next_publish_time(cfg: Config, db: DB, variant: str = "short") -> datetime:
+    """예약 업로드 시각: 요일(평일/주말)과 영상 종류(쇼츠/롱폼)에 맞는 추천 시간대 중
+    아직 비어있는 가장 가까운 미래 슬롯을 고른다."""
     from zoneinfo import ZoneInfo
     tz = ZoneInfo(cfg.get("youtube.timezone"))
     now = datetime.now(tz)
     taken = {r["publish_at"] for r in db.query("SELECT publish_at FROM uploads WHERE publish_at IS NOT NULL")}
+    times = SCHEDULE_BY_TYPE.get(variant, SCHEDULE_BY_TYPE["short"])
     for day in range(0, 60):
         d = (now + timedelta(days=day)).date()
-        for hm in cfg.get("youtube.schedule_times"):
-            h, m = (int(x) for x in hm.split(":"))
-            slot = datetime(d.year, d.month, d.day, h, m, tzinfo=tz)
-            iso = slot.isoformat()
-            if slot > now + timedelta(minutes=20) and iso not in taken:
-                return slot
+        is_weekend = d.weekday() >= 5  # 5=토, 6=일
+        hm = times["weekend"] if is_weekend else times["weekday"]
+        h, m = (int(x) for x in hm.split(":"))
+        slot = datetime(d.year, d.month, d.day, h, m, tzinfo=tz)
+        iso = slot.isoformat()
+        if slot > now + timedelta(minutes=20) and iso not in taken:
+            return slot
     raise YouTubeError("60일 안에 빈 예약 슬롯이 없습니다")
 
 

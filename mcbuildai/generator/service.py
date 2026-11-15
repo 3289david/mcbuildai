@@ -79,7 +79,7 @@ def create_building(cfg: Config, db: DB, dna: BuildingDNA, name: str, concept: s
     try:
         model = None
         if engine in ("auto", "genmc"):
-            from mcbuildai.planner.ai_client import AIClient
+            from mcbuildai.planner.ai_client import AIClient, AIUnavailable
             from .genmc import GenMC, GenMCDesigner, GenMCError
             ai = AIClient(cfg)
             gm = GenMC(cfg, db)
@@ -101,7 +101,7 @@ def create_building(cfg: Config, db: DB, dna: BuildingDNA, name: str, concept: s
                     meta.update(engine="genmc", genmc_summary=res.summary, genmc_parts=res.parts,
                                 genmc_skipped_lines=res.skipped_lines,
                                 genmc_render=str(res.preview_png) if res.preview_png else None)
-                except GenMCError as e:
+                except (GenMCError, AIUnavailable) as e:
                     if engine == "genmc":
                         raise
                     db.log("WARN", "generator", f"genMC 사용 불가, 절차적 생성기로 대체: {e}")

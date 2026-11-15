@@ -155,10 +155,21 @@ class Pipeline:
         r_cam = self.server.rcon()
         cam = CameraController(r_cam, self.cfg.get("client.camera_player"),
                                mode=self.cfg.get("camera.mode", "display"))
-        client = ClientManager(self.cfg)
+        # 이 서버는 GPU가 없어서 실제 마인크래프트 클라이언트 실행+녹화 성능이 나쁘다.
+        # Windows 에이전트(사용자 PC)가 접속해 있으면 그쪽에 클라이언트 실행/녹화를 위임하고,
+        # 접속해 있지 않으면 이 서버에서 직접 한다 (카메라 RCON 연출은 어느 쪽이든 항상 서버가 한다).
+        from mcbuildai.jobs.agent_hub import HUB
+        use_agent = bool(self.cfg.get("agent.enabled", True)) and HUB.is_online(
+            float(self.cfg.get("agent.heartbeat_timeout_sec", 25)))
+        if use_agent:
+            from mcbuildai.camera.remote import RemoteClientManager
+            client = RemoteClientManager(self.cfg)
+            self.db.log("INFO", "capture", f"작업 {jid}: Windows 에이전트에 촬영 위임", jid)
+        else:
+            client = ClientManager(self.cfg)
         try:
             if not cam.player_online():
-                if self.cfg.get("client.launch_command"):
+                if use_agent or self.cfg.get("client.launch_command"):
                     client.launch()
                 client.wait_until_online(cam.player_online, float(self.cfg.get("client.startup_wait_sec")) + 120)
                 time.sleep(float(self.cfg.get("client.startup_wait_sec")) / 4)
@@ -171,7 +182,11 @@ class Pipeline:
             hero = CP.hero(frame, angle_deg=40)
             cam.setup(hero(0, 0))
             time.sleep(2.0)
-            rec = ScreenRecorder(self.cfg, live_preview=live)
+            if use_agent:
+                from mcbuildai.camera.remote import RemoteScreenRecorder
+                rec = RemoteScreenRecorder(self.cfg, work)
+            else:
+                rec = ScreenRecorder(self.cfg, live_preview=live)
 
             def shoot(name: str, path_fn, seconds: float) -> None:
                 if segs.get(name):
@@ -407,16 +422,21 @@ class Pipeline:
         dna = BuildingDNA.from_json(b["dna_json"])
         made = ck.get("videos", {})
         ups = ck.setdefault("uploads", {})
-        targets = ["edited", "edited_b"] + (["edited_landscape"] if self.cfg.get("youtube.upload_landscape") else [])
+        # 롱폼(가로)은 숏츠보다 덜 자주 올린다 (youtube.landscape_every_days 일마다 1개).
+        # building_id가 사실상 날짜 순서라서(하루 1개 빌딩), bid 나누기로 "N일마다"를 결정한다.
+        every = max(1, int(self.cfg.get("youtube.landscape_every_days", 1)))
+        upload_landscape_now = bool(self.cfg.get("youtube.upload_landscape")) and (bid % every == 0)
+        targets = ["edited", "edited_b"] + (["edited_landscape"] if upload_landscape_now else [])
         self.cfg.data.setdefault("_runtime", {})["trend_keywords"] = self.db.kv_get("trend_keywords", [])
         for variant in targets:
             if variant not in made or variant in ups:
                 continue
             v = self.db.one("SELECT * FROM videos WHERE id=?", (made[variant],))
             meta = json.loads(v["meta_json"] or "{}")
+            content_kind = "long" if variant == "edited_landscape" else "short"
             md = generate_metadata(self.cfg, b["name"], b["concept"] or "", dna, b["block_count"] or 0,
-                                   meta.get("credits"), variant="long" if variant == "edited_landscape" else "short")
-            publish_at = next_publish_time(self.cfg, self.db).isoformat()
+                                   meta.get("credits"), variant=content_kind)
+            publish_at = next_publish_time(self.cfg, self.db, variant=content_kind).isoformat()
             extra = {"language": md["language"], "localizations": md["localizations"],
                      "thumbnail": meta.get("thumbnail")}
             uid = self.db.execute(

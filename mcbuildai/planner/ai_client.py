@@ -20,6 +20,7 @@ class AIClient:
     def __init__(self, cfg: Config):
         self.cfg = cfg
         self.model = cfg.get("ai.model")
+        self.provider = cfg.get("ai.provider", "anthropic")
         self._client = None
 
     def available(self) -> bool:
@@ -30,20 +31,36 @@ class AIClient:
         if self._client is None:
             if not self.available():
                 raise AIUnavailable(f"환경 변수 {self.cfg.get('ai.api_key_env')} 가 설정되지 않았습니다")
-            import anthropic
-            self._client = anthropic.Anthropic(api_key=os.environ[self.cfg.get("ai.api_key_env")])
+            api_key = os.environ[self.cfg.get("ai.api_key_env")]
+            if self.provider == "openrouter":
+                # OpenRouter 는 OpenAI 호환 API 라서 openai SDK 를 base_url 만 바꿔서 쓴다.
+                import openai
+                self._client = openai.OpenAI(api_key=api_key, base_url="https://openrouter.ai/api/v1")
+            else:
+                import anthropic
+                self._client = anthropic.Anthropic(api_key=api_key)
         return self._client
 
     @staticmethod
-    def image_block(path: str | Path) -> dict:
+    def image_block(path: str | Path, provider: str = "anthropic") -> dict:
         p = Path(path)
         mt = mimetypes.guess_type(p.name)[0] or "image/png"
-        return {"type": "image", "source": {"type": "base64", "media_type": mt,
-                                            "data": base64.b64encode(p.read_bytes()).decode()}}
+        data = base64.b64encode(p.read_bytes()).decode()
+        if provider == "openrouter":
+            return {"type": "image_url", "image_url": {"url": f"data:{mt};base64,{data}"}}
+        return {"type": "image", "source": {"type": "base64", "media_type": mt, "data": data}}
 
     def text(self, system: str, prompt: str, images: list[str | Path] | None = None,
              max_tokens: int = 2000) -> str:
-        content: list[dict] = [self.image_block(i) for i in (images or [])]
+        if self.provider == "openrouter":
+            content: list[dict] = [self.image_block(i, "openrouter") for i in (images or [])]
+            content.append({"type": "text", "text": prompt})
+            resp = self.client.chat.completions.create(
+                model=self.model, max_tokens=max_tokens,
+                messages=[{"role": "system", "content": system}, {"role": "user", "content": content}],
+            )
+            return resp.choices[0].message.content or ""
+        content = [self.image_block(i) for i in (images or [])]
         content.append({"type": "text", "text": prompt})
         resp = self.client.messages.create(model=self.model, max_tokens=max_tokens, system=system,
                                            messages=[{"role": "user", "content": content}])
@@ -56,6 +73,10 @@ class AIClient:
         return parse_json(raw)
 
     def messages(self, **kwargs):
+        if self.provider == "openrouter":
+            # genMC 설계 에이전트의 tools= 호출은 Anthropic 전용 스키마라 OpenRouter(OpenAI 호환)로는
+            # 그대로 못 쓴다. genMC 를 쓰려면 ai.provider: anthropic 으로 되돌려야 한다.
+            raise AIUnavailable("genMC 도구 호출은 OpenRouter provider에서 지원되지 않습니다 (ai.provider: anthropic 필요)")
         kwargs.setdefault("model", self.model)
         return self.client.messages.create(**kwargs)
 

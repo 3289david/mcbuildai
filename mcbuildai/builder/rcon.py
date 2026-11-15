@@ -18,7 +18,7 @@ class Rcon:
         self.host, self.port, self.password, self.timeout = host, port, password, timeout
         self.sock: socket.socket | None = None
         self._req = 0
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()  # commands()가 실패 시 command()로 재진입 호출하므로 재진입 가능해야 함
 
     def connect(self) -> "Rcon":
         if not self.password:
@@ -109,9 +109,12 @@ class Rcon:
                     if pid in res:
                         res[pid].append(body)
                 return ["".join(res[i]) for i in ids]
-            except (OSError, struct.error) as e:
+            except (OSError, struct.error, RconError):
                 self.close()
-                raise RconError(f"RCON 명령 실패: {e}") from e
+                # 일부 RCON 서버 구현은 한 번에 여러 명령을 파이프라인으로 보내면 연결을 끊는다.
+                # 그런 경우 재연결 후 한 개씩 순차 전송으로 대체한다 (느리지만 훨씬 안정적).
+                self.connect()
+                return [self.command(c) for c in cmds]
 
     def ping(self) -> bool:
         try:

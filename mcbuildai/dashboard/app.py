@@ -9,8 +9,8 @@ import time
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
-from fastapi import Body, FastAPI, File, Form, HTTPException, UploadFile
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from fastapi import Body, FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 
 from mcbuildai.config import Config
 from mcbuildai.db import DB, now_iso
@@ -387,6 +387,56 @@ def create_app(cfg: Config, db: DB) -> FastAPI:
         db.log("INFO", "dashboard", "설정 저장")
         return {"ok": True, "note": "일부 설정은 프로그램을 다시 시작해야 적용됩니다"}
 
+    # ---------------- YouTube OAuth (웹 리다이렉트 흐름) ----------------
+    # 헤드리스 서버라 InstalledAppFlow(로컬 브라우저 자동 실행)를 못 쓰므로,
+    # 공개 redirect_uri로 돌아오는 표준 웹 OAuth 흐름을 쓴다.
+    YOUTUBE_SCOPES = [
+        "https://www.googleapis.com/auth/youtube.upload",
+        "https://www.googleapis.com/auth/youtube.readonly",
+        "https://www.googleapis.com/auth/youtube.force-ssl",
+        "https://www.googleapis.com/auth/yt-analytics.readonly",
+    ]
+
+    def _oauth_redirect_uri() -> str:
+        return cfg.get("dashboard.public_url", "").rstrip("/") + "/oauth2callback"
+
+    # state -> PKCE code_verifier. authorization_url()이 매번 새 code_verifier를 만들기 때문에,
+    # callback에서 토큰을 교환할 때 "같은" verifier를 다시 써야 한다 (안 그러면 invalid_grant).
+    _oauth_pending: dict[str, str] = {}
+
+    @app.get("/oauth2start")
+    def oauth2_start():
+        from google_auth_oauthlib.flow import Flow
+        secrets = cfg.path_of("youtube.client_secrets")
+        if not secrets.exists():
+            raise HTTPException(400, f"OAuth 클라이언트 파일이 없습니다: {secrets}")
+        flow = Flow.from_client_secrets_file(str(secrets), scopes=YOUTUBE_SCOPES, redirect_uri=_oauth_redirect_uri())
+        auth_url, state = flow.authorization_url(access_type="offline", prompt="consent", include_granted_scopes="true")
+        _oauth_pending[state] = flow.code_verifier
+        return RedirectResponse(auth_url)
+
+    @app.get("/oauth2callback", response_class=HTMLResponse)
+    def oauth2_callback(request: Request):
+        from google_auth_oauthlib.flow import Flow
+        error = request.query_params.get("error")
+        if error:
+            return f"<h3>연결 실패</h3><p>{error}</p>"
+        code = request.query_params.get("code")
+        state = request.query_params.get("state")
+        if not code:
+            raise HTTPException(400, "code 파라미터가 없습니다")
+        verifier = _oauth_pending.pop(state, None)
+        secrets = cfg.path_of("youtube.client_secrets")
+        flow = Flow.from_client_secrets_file(str(secrets), scopes=YOUTUBE_SCOPES, redirect_uri=_oauth_redirect_uri(),
+                                             code_verifier=verifier)
+        flow.fetch_token(code=code)
+        creds = flow.credentials
+        token = cfg.path_of("youtube.token_file")
+        token.parent.mkdir(parents=True, exist_ok=True)
+        token.write_text(creds.to_json(), encoding="utf-8")
+        db.log("INFO", "youtube", "OAuth 연결 완료 (웹 흐름)")
+        return "<h3>✅ YouTube 계정이 연결됐습니다. 이 탭은 닫으셔도 됩니다.</h3>"
+
     @app.get("/api/logs")
     def logs(level: str = "", limit: int = 300, source: str = ""):
         q, params = "SELECT * FROM logs WHERE 1=1", []
@@ -396,6 +446,46 @@ def create_app(cfg: Config, db: DB) -> FastAPI:
             q += " AND source=?"; params.append(source)
         q += " ORDER BY id DESC LIMIT ?"; params.append(limit)
         return db.query(q, tuple(params))
+
+    # ---------------- 촬영용 에이전트(사용자 Windows PC) ----------------
+    # 서버는 RCON 카메라 연출은 그대로 자기가 하고, 실제 마인크래프트 클라이언트 실행 +
+    # 화면 녹화만 접속해 있는 에이전트에게 위임한다 (agent_hub.HUB 를 통한 폴링식 RPC).
+    from mcbuildai.jobs.agent_hub import HUB
+
+    def _check_agent_token(token: str):
+        if not token or token != cfg.get("agent.token"):
+            raise HTTPException(401, "잘못된 에이전트 토큰입니다")
+
+    @app.post("/api/agent/heartbeat")
+    def agent_heartbeat(token: str = Body(..., embed=True)):
+        _check_agent_token(token)
+        HUB.heartbeat()
+        return {"ok": True}
+
+    @app.get("/api/agent/poll")
+    def agent_poll(token: str):
+        _check_agent_token(token)
+        HUB.heartbeat()
+        return {"commands": HUB.drain()}
+
+    @app.post("/api/agent/ack")
+    def agent_ack(token: str = Body(...), id: str = Body(...), result: dict = Body({})):
+        _check_agent_token(token)
+        HUB.ack(id, result)
+        return {"ok": True}
+
+    @app.post("/api/agent/upload")
+    async def agent_upload(token: str = Form(...), name: str = Form(...), work_dir: str = Form(...),
+                           file: UploadFile = File(...)):
+        _check_agent_token(token)
+        dest = Path(work_dir) / "capture" / f"{name}.mp4"
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(await file.read())
+        return {"ok": True, "path": str(dest)}
+
+    @app.get("/api/agent/status")
+    def agent_status():
+        return {"online": HUB.is_online(float(cfg.get("agent.heartbeat_timeout_sec", 25)))}
 
     return app
 

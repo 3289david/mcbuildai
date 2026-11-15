@@ -1,0 +1,10 @@
+{
+  "server_url": "https://yt.audest.me",
+  "token": "PUT_YOUR_AGENT_TOKEN_HERE",
+  "prism_path": "C:\\Program Files\\PrismLauncher\\prismlauncher.exe",
+  "instance": "BuildCam",
+  "profile": "davvid3289",
+  "join_server": "audestyt.gamehost.kr:1035",
+  "window_title": "Minecraft 1.21.1",
+  "ffmpeg_path": "ffmpeg.exe"
+}

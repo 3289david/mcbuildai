@@ -117,8 +117,9 @@ class Scheduler:
         self.stop = threading.Event()
 
     def tick(self, now: datetime | None = None) -> None:
+        from zoneinfo import ZoneInfo
         from mcbuildai.planner.planner import Planner
-        now = now or datetime.now()
+        now = now or datetime.now(ZoneInfo(self.cfg.get("youtube.timezone", "UTC")))
         today = now.date().isoformat()
         hh, mm = (int(x) for x in self.cfg.get("jobs.daily_time", "09:00").split(":"))
         if self.db.kv_get("daily_done") != today and (now.hour, now.minute) >= (hh, mm):
