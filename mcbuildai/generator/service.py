@@ -87,11 +87,21 @@ def create_building(cfg: Config, db: DB, dna: BuildingDNA, name: str, concept: s
         if engine in ("auto", "genmc"):
             from mcbuildai.planner.ai_client import AIClient, AIUnavailable
             from .genmc import GenMC, GenMCDesigner, GenMCError
-            # genMC 의 도구 호출 루프는 Anthropic 네이티브 tool_use 스키마가 필요해서,
-            # 글로벌 ai.provider(비용 절감용 OpenRouter)와 무관하게 항상 전용 Anthropic 클라이언트를 쓴다.
-            ai = AIClient(cfg, provider="anthropic",
-                         api_key_env=cfg.get("genmc.anthropic_api_key_env", "ANTHROPIC_API_KEY"),
-                         model=cfg.get("genmc.model", "claude-sonnet-5-5"))
+            # genMC 는 MCP 표준 서버라 특정 LLM 제공자에 종속되지 않는다
+            # (https://genmc.app/docs/connect-agent: Claude/ChatGPT/Codex 등 모두 지원).
+            # genmc.provider 를 명시하지 않으면 글로벌 ai.provider(기본 OpenRouter)를 그대로 써서
+            # 같은 키로 genMC 를 운전한다 (전용 Anthropic 키가 따로 필요 없음).
+            genmc_provider = cfg.get("genmc.provider") or cfg.get("ai.provider", "anthropic")
+            if genmc_provider == "anthropic":
+                key_env = cfg.get("genmc.anthropic_api_key_env", "ANTHROPIC_API_KEY")
+                genmc_model = cfg.get("genmc.model") or "claude-sonnet-5-5"
+            else:
+                key_env = cfg.get("ai.api_key_env")
+                # ai.model(gpt-5-nano)은 이름/콘셉트 생성용 저가 모델이라 genMC 의 복잡한 에이전트
+                # 루프에는 약하다. OpenRouter 는 Claude 모델도 그대로 호출 가능하므로 같은 키로
+                # 더 강한 모델을 쓴다.
+                genmc_model = cfg.get("genmc.model") or "anthropic/claude-sonnet-4.5"
+            ai = AIClient(cfg, provider=genmc_provider, api_key_env=key_env, model=genmc_model)
             gm = GenMC(cfg, db)
             if ai.available() and gm.resume_key:
                 try:

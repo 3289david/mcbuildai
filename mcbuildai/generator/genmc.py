@@ -360,49 +360,35 @@ class GenMCDesigner:
                           "input_schema": schema})
         return tools
 
+    def _openai_tools(self) -> list[dict]:
+        """genMC 는 MCP 표준 서버라 Claude뿐 아니라 ChatGPT/Codex 등 tool-calling 가능한 모델이면
+        다 에이전트로 쓸 수 있다 (https://genmc.app/docs/connect-agent). OpenRouter 는 OpenAI 호환
+        함수 호출 스키마라 여기서 변환해서 그대로 쓴다 (전용 Anthropic 키가 따로 필요 없음)."""
+        out = []
+        for t in self._anthropic_tools():
+            out.append({"type": "function", "function": {
+                "name": t["name"], "description": t["description"], "parameters": t["input_schema"]}})
+        return out
+
+    def _call_genmc_tool(self, name: str, args: dict) -> tuple[str, bool, list[tuple[str, bytes]]]:
+        try:
+            res = self.genmc.raw_tool(name, args)
+            return (result_text(res) or "(빈 결과)"), bool(res.get("isError")), result_images(res)[:2]
+        except GenMCError as e:
+            return str(e), True, []
+
     def design(self, brief: str, project_name: str, work_dir: Path, images: list[Path] | None = None,
                max_turns: int = 60, base_project: str | None = None) -> DesignResult:
         work_dir.mkdir(parents=True, exist_ok=True)
         self.genmc.resume()
-        tools = self._anthropic_tools()
-        first: list[dict] = [self.ai.image_block(p) for p in (images or [])]
         text = f"프로젝트 이름: {project_name}\n\n설계 조건:\n{brief}"
         if base_project:
             text += (f"\n\n기존 프로젝트 '{base_project}' 를 바탕으로 변형한다. build_list_projects 와 build_select_project 로 "
                      "열어 build_get_recipe 로 프로그램을 읽은 뒤, 새 프로젝트를 만들어 변형한 프로그램을 실행한다.")
-        first.append({"type": "text", "text": text})
-        messages: list[dict] = [{"role": "user", "content": first}]
-        transcript = []
-        final_text = ""
-        for turn in range(max_turns):
-            resp = self.ai.messages(max_tokens=8000, system=DESIGNER_SYSTEM, tools=tools, messages=messages)
-            messages.append({"role": "assistant", "content": [b.model_dump() for b in resp.content]})
-            tool_results = []
-            for b in resp.content:
-                if b.type == "text":
-                    final_text = b.text
-                    transcript.append({"turn": turn, "text": b.text[:2000]})
-                elif b.type == "tool_use":
-                    transcript.append({"turn": turn, "tool": b.name, "input": json.dumps(b.input, ensure_ascii=False)[:2000]})
-                    try:
-                        res = self.genmc.raw_tool(b.name, b.input)
-                        content = []
-                        txt = result_text(res)
-                        if txt:
-                            content.append({"type": "text", "text": txt[:20000]})
-                        for mt, data in result_images(res)[:2]:
-                            content.append({"type": "image", "source": {"type": "base64", "media_type": mt,
-                                                                        "data": base64.b64encode(data).decode()}})
-                        if not content:
-                            content = [{"type": "text", "text": "(빈 결과)"}]
-                        tool_results.append({"type": "tool_result", "tool_use_id": b.id, "content": content,
-                                             "is_error": bool(res.get("isError"))})
-                    except GenMCError as e:
-                        tool_results.append({"type": "tool_result", "tool_use_id": b.id,
-                                             "content": [{"type": "text", "text": str(e)}], "is_error": True})
-            if resp.stop_reason != "tool_use":
-                break
-            messages.append({"role": "user", "content": tool_results})
+        if self.ai.provider == "openrouter":
+            final_text, transcript = self._design_loop_openai(text, images, max_turns)
+        else:
+            final_text, transcript = self._design_loop_anthropic(text, images, max_turns)
         tpath = work_dir / "genmc_transcript.json"
         tpath.write_text(json.dumps(transcript, ensure_ascii=False, indent=1), encoding="utf-8")
         summary, parts = "", []
@@ -422,3 +408,63 @@ class GenMCDesigner:
             self.db.log("WARN", "genmc", f"렌더 실패: {e}")
         return DesignResult(model=model, preview_png=preview, parts=parts, summary=summary,
                             skipped_lines=len(skipped), transcript_path=tpath)
+
+    def _design_loop_anthropic(self, text: str, images: list[Path] | None,
+                               max_turns: int) -> tuple[str, list[dict]]:
+        tools = self._anthropic_tools()
+        first: list[dict] = [self.ai.image_block(p) for p in (images or [])]
+        first.append({"type": "text", "text": text})
+        messages: list[dict] = [{"role": "user", "content": first}]
+        transcript: list[dict] = []
+        final_text = ""
+        for turn in range(max_turns):
+            resp = self.ai.messages(max_tokens=8000, system=DESIGNER_SYSTEM, tools=tools, messages=messages)
+            messages.append({"role": "assistant", "content": [b.model_dump() for b in resp.content]})
+            tool_results = []
+            for b in resp.content:
+                if b.type == "text":
+                    final_text = b.text
+                    transcript.append({"turn": turn, "text": b.text[:2000]})
+                elif b.type == "tool_use":
+                    transcript.append({"turn": turn, "tool": b.name, "input": json.dumps(b.input, ensure_ascii=False)[:2000]})
+                    txt, is_error, imgs = self._call_genmc_tool(b.name, b.input)
+                    content = [{"type": "text", "text": txt[:20000]}]
+                    for mt, data in imgs:
+                        content.append({"type": "image", "source": {"type": "base64", "media_type": mt,
+                                                                    "data": base64.b64encode(data).decode()}})
+                    tool_results.append({"type": "tool_result", "tool_use_id": b.id, "content": content,
+                                         "is_error": is_error})
+            if resp.stop_reason != "tool_use":
+                break
+            messages.append({"role": "user", "content": tool_results})
+        return final_text, transcript
+
+    def _design_loop_openai(self, text: str, images: list[Path] | None,
+                            max_turns: int) -> tuple[str, list[dict]]:
+        """OpenRouter(OpenAI 호환 함수 호출)로 genMC 를 직접 운전한다. genMC 는 특정 LLM 제공자에
+        종속되지 않는 MCP 서버라서 이 경로로도 똑같이 동작한다."""
+        tools = self._openai_tools()
+        user_content: list[dict] = [self.ai.image_block(p, "openrouter") for p in (images or [])]
+        user_content.append({"type": "text", "text": text})
+        messages: list[dict] = [{"role": "system", "content": DESIGNER_SYSTEM},
+                                {"role": "user", "content": user_content}]
+        transcript: list[dict] = []
+        final_text = ""
+        for turn in range(max_turns):
+            resp = self.ai.client.chat.completions.create(
+                model=self.ai.model, max_tokens=8000, messages=messages, tools=tools, tool_choice="auto")
+            msg = resp.choices[0].message
+            messages.append(msg.model_dump(exclude_none=True))
+            tool_calls = msg.tool_calls or []
+            if msg.content:
+                final_text = msg.content
+                transcript.append({"turn": turn, "text": msg.content[:2000]})
+            if not tool_calls:
+                break
+            for tc in tool_calls:
+                args = json.loads(tc.function.arguments or "{}")
+                transcript.append({"turn": turn, "tool": tc.function.name,
+                                   "input": json.dumps(args, ensure_ascii=False)[:2000]})
+                txt, is_error, _imgs = self._call_genmc_tool(tc.function.name, args)
+                messages.append({"role": "tool", "tool_call_id": tc.id, "content": txt[:20000]})
+        return final_text, transcript

@@ -32,8 +32,12 @@ DEFAULTS: dict[str, Any] = {
     "genmc": {
         "mcp_url": "https://genmc.app/api/mcp",
         "export_version": "1.21.1",    # 서버 Minecraft 버전과 맞춘다
-        "anthropic_api_key_env": "ANTHROPIC_API_KEY",  # genMC 도구 호출은 항상 Anthropic 네이티브 키가 필요함 (ai.provider 와 무관)
-        "model": "claude-sonnet-5-5",
+        # genMC 는 MCP 표준 서버라 특정 LLM에 종속되지 않는다 (Claude/ChatGPT/Codex 모두 지원).
+        # provider 를 비워두면 글로벌 ai.provider(기본 OpenRouter)를 그대로 써서 같은 키로 운전한다.
+        # provider: anthropic 으로 명시하면 아래 두 값으로 전용 Anthropic 클라이언트를 쓴다.
+        "provider": None,
+        "anthropic_api_key_env": "ANTHROPIC_API_KEY",
+        "model": None,                 # None이면 provider에 맞는 기본 모델을 코드에서 고른다
     },
     "planner": {
         "horizon_days": 7,
