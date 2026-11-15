@@ -242,6 +242,24 @@ func prismDataDir() string {
 	return filepath.Dir(cfg.PrismPath)
 }
 
+// Prism 은 Java/언어/테마/계정 중 뭐라도 설정이 비어있으면 첫 실행 시 "설정 마법사" 모달을
+// 띄우는데, 그걸 눌러줄 사람이 없는 헤드리스 환경에선 그 창에서 영원히 멈춘다
+// (Application::createSetupWizard() 조건 참고). 그래서 이 값들을 미리 다 채워서
+// 마법사 자체가 뜰 조건을 아예 없앤다. Linux 쪽에서 dialog_killer.sh 로 다이얼로그를
+// 자동으로 눌러준 것과 같은 목적, Windows 에선 그 방식이 안 통해서 설정으로 막는다.
+func ensurePrismSettings() {
+	path := filepath.Join(prismDataDir(), "prismlauncher.cfg")
+	content := "[General]\n" +
+		"IgnoreJavaWizard=true\n" +
+		"UserAskedAboutAutomaticJavaDownload=true\n" +
+		"AutomaticJavaSwitch=true\n" +
+		"Language=en_US\n" +
+		"ApplicationTheme=system\n" +
+		"IconTheme=pe_colored\n"
+	must(os.WriteFile(path, []byte(content), 0644))
+	fmt.Println(">>> Prism 설정 마법사 비활성화 완료")
+}
+
 // ---------------- 부트스트랩: Java 런타임 ----------------
 // Prism 자체가 실행되는 건 Java 와 무관하지만, 실제 마인크래프트(Fabric)를 켜려면 JRE 가 있어야
 // 한다. 없으면 Prism 이 설정 대화상자를 띄우거나 조용히 실패해서, Prism 프로세스는 뜨는데
@@ -644,6 +662,7 @@ func main() {
 	fmt.Println("=== mcbuildai 촬영 에이전트 ===")
 	ensureAutostart()
 	ensurePrism()
+	ensurePrismSettings()
 	javaPath := ensureJava()
 	ensureInstance(javaPath)
 	ensureAccount()
