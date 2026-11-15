@@ -503,6 +503,8 @@ func refreshAccountIfNeeded() {
 		return
 	}
 	acc := parsed.Accounts[0]
+	say(">>> (진단) 계정 토큰 만료 시각:", acc.MSA.Exp, "/ 현재:", time.Now().Unix(),
+		"/ 남은 시간(초):", acc.MSA.Exp-time.Now().Unix())
 	if acc.MSA.Exp > time.Now().Unix()+60 {
 		return // 아직 1분 이상 여유 있음
 	}
@@ -631,10 +633,18 @@ func handleLaunch() map[string]any {
 		logFile.Close()
 	}()
 	go func() {
-		time.Sleep(10 * time.Second)
-		data, _ := os.ReadFile(logPath)
-		say(">>> ---- Prism 실행 로그 (실행 후 10초) ----")
-		say(string(data))
+		var lastLen int
+		for elapsed := 10; elapsed <= 90; elapsed += 20 {
+			time.Sleep(20 * time.Second)
+			data, _ := os.ReadFile(logPath)
+			if len(data) == lastLen {
+				say(">>> ---- Prism 실행", elapsed, "초째: 추가 출력 없음 (아직 멈춰 있음) ----")
+				continue
+			}
+			say(">>> ---- Prism 실행 로그 (실행 후", elapsed, "초, 새 내용만) ----")
+			say(string(data[lastLen:]))
+			lastLen = len(data)
+		}
 		say(">>> ---- 로그 끝 (이 창에 뜬 내용을 그대로 복사해서 보내주세요) ----")
 	}()
 	return map[string]any{"ok": true}
