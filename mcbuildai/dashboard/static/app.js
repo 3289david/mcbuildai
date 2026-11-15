@@ -70,7 +70,7 @@ async function vDashboard() {
 
 // ---------------------------------------------------------------- AI Studio
 async function vStudio() {
-  const [c, bs, gm] = await Promise.all([getCatalog(), api("/api/buildings?limit=60"), api("/api/studio/genmc/status")]);
+  const [c, bs, gm, ag] = await Promise.all([getCatalog(), api("/api/buildings?limit=60"), api("/api/studio/genmc/status"), api("/api/studio/agent_info")]);
   view.innerHTML = `
   <div class="grid g2">
     <div class="card"><h2>건축물 생성</h2>
@@ -94,6 +94,15 @@ async function vStudio() {
       <form id="pair" class="row"><input name="code" placeholder="예: K7Q-4MX" style="max-width:200px"><button>페어링</button></form>
     </div>
   </div>
+  <div class="card" style="margin-top:14px"><h2>Windows 촬영 에이전트</h2>
+    <div class="kv"><div>연결 상태</div><div>${ag.online ? '<span class="ok">온라인</span>' : '<span class="warn">오프라인</span>'}</div>
+      <div>토큰</div><div><code id="agent-token" style="word-break:break-all">${esc(ag.token || "(없음)")}</code>
+        ${ag.token ? ' <button type="button" id="copy-token" class="btn">복사</button>' : ''}</div>
+      <div>exe 다운로드</div><div>${ag.exe_download_url
+        ? `<a class="btn" href="${esc(ag.exe_download_url)}">mcbuildai-agent.exe 받기</a> <span class="muted">(토큰 내장됨, agent.json 필요 없음${ag.exe_built_at ? ", 빌드: " + fmtT(ag.exe_built_at) : ""})</span>`
+        : '<span class="warn">아직 빌드되지 않음</span>'}</div></div>
+    <p class="muted">Windows PC에서 위 exe 를 그냥 실행하면 됩니다. 처음 실행 시 Prism Launcher/ffmpeg/계정 로그인까지 자동으로 준비합니다.</p>
+  </div>
   <div class="card" style="margin-top:14px"><h2>생성된 건축물</h2>
     <div class="thumbs">${bs.length ? bs.map(b => `<div class="card">
       ${b.preview_path ? `<img src="${fileUrl(b.preview_path)}" loading="lazy">` : `<div class="empty">${esc(b.status)}</div>`}
@@ -112,6 +121,10 @@ async function vStudio() {
     e.preventDefault();
     try { await api("/api/studio/genmc/pair", {json: {code: e.target.code.value}}); toast("페어링 완료"); render(); }
     catch (err) { toast(err.message, true); }
+  };
+  const copyBtn = $("#copy-token");
+  if (copyBtn) copyBtn.onclick = () => {
+    navigator.clipboard.writeText($("#agent-token").textContent).then(() => toast("토큰을 복사했습니다"));
   };
   view.querySelectorAll("[data-job]").forEach(b => b.onclick = async () => {
     const r = await api("/api/jobs", {json: {building_id: +b.dataset.job, priority: 3, experiment: false}});

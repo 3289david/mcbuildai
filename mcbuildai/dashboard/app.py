@@ -182,6 +182,23 @@ def create_app(cfg: Config, db: DB) -> FastAPI:
                 out["error"] = str(e)
         return out
 
+    # ---------------- Windows 촬영 에이전트 ----------------
+    # 주의: 경로가 /api/agent/ 로 시작하면 안 됨 — nginx 에서 그 접두사는 Windows 에이전트 자체 호출용으로
+    # Basic Auth 를 뺐기 때문에, 토큰을 보여주는 이 라우트가 거기 걸리면 인증 없이 토큰이 노출된다.
+    @app.get("/api/studio/agent_info")
+    def agent_info():
+        from mcbuildai.jobs.agent_hub import HUB
+        exe_path = cfg.path_of("paths.data_dir") / "agent" / "mcbuildai-agent.exe"
+        return {
+            "enabled": bool(cfg.get("agent.enabled", True)),
+            "token": cfg.get("agent.token"),
+            "online": HUB.is_online(float(cfg.get("agent.heartbeat_timeout_sec", 25))),
+            "exe_ready": exe_path.is_file(),
+            "exe_download_url": f"/files?path={exe_path}" if exe_path.is_file() else None,
+            "exe_built_at": datetime.fromtimestamp(exe_path.stat().st_mtime).isoformat()
+                           if exe_path.is_file() else None,
+        }
+
     # ---------------- Build Manager ----------------
     @app.get("/api/jobs")
     def jobs(limit: int = 100):
