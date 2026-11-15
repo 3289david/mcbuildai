@@ -44,12 +44,19 @@ class Worker:
         self.max_retries = int(cfg.get("jobs.max_retries"))
 
     def recover_stale(self) -> None:
-        """이전 실행에서 'running' 으로 남은 작업을 재시도 상태로 되돌린다 (중단 지점부터 이어서 작업)."""
-        rows = self.db.query("SELECT id, worker FROM jobs WHERE status='running'")
+        """이전 실행에서 'running' 으로 남은 작업을 재시도 상태로 되돌린다 (중단 지점부터 이어서 작업).
+
+        이 함수는 매 워커 스레드가 loop() 시작 시 '딱 한 번' 호출된다 - 그 시점에는 이 프로세스가
+        아직 아무 작업도 claim 하지 않았으므로, 'running' 상태인 작업은 전부 이전 생애(프로세스
+        재시작/크래시)에서 중단된 것이다. 예전엔 worker 이름이 hostname 으로 시작하는지, 그리고
+        현재 self.name 과 다른지를 확인했는데, `mcbuildai run` 이 스레드를 'w0','w1'... 식 고정
+        이름으로 매번 똑같이 재생성하기 때문에 재시작 후에도 worker 이름이 그대로라 절대 복구되지
+        않는 버그가 있었다 (게다가 'w0' 는 hostname 으로 시작하지도 않아서 애초에 조건 자체가
+        거의 항상 거짓이었다)."""
+        rows = self.db.query("SELECT id FROM jobs WHERE status='running'")
         for r in rows:
-            if r["worker"] and r["worker"].startswith(socket.gethostname()) and r["worker"] != self.name:
-                self.db.update_job(r["id"], status="retry")
-                self.db.log("WARN", "jobs", f"작업 {r['id']} 이전 실행 중단 감지, 이어서 진행 예정", r["id"])
+            self.db.update_job(r["id"], status="retry", worker=None)
+            self.db.log("WARN", "jobs", f"작업 {r['id']} 이전 실행 중단 감지, 이어서 진행 예정", r["id"])
 
     def handle(self, job: dict) -> None:
         jid = job["id"]
