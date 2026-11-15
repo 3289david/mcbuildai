@@ -567,6 +567,17 @@ def create_app(cfg: Config, db: DB) -> FastAPI:
         db.log("INFO", "agent", f"에이전트 ack ({ip}): {id} -> {result}")
         return {"ok": True}
 
+    @app.post("/api/agent/log")
+    def agent_log(request: Request, token: str = Body(...), log: str = Body("")):
+        _check_agent_token(token)
+        HUB.set_console_log(log, _req_ip(request))
+        return {"ok": True}
+
+    @app.get("/api/studio/agent_log")
+    def agent_log_view():
+        return {"log": HUB.console_log, "updated_at": datetime.fromtimestamp(HUB.console_log_at).isoformat()
+                if HUB.console_log_at else None}
+
     @app.post("/api/agent/upload")
     async def agent_upload(token: str = Form(...), name: str = Form(...), work_dir: str = Form(...),
                            file: UploadFile = File(...)):

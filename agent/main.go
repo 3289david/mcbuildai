@@ -17,8 +17,34 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 )
+
+// say 는 fmt.Println 과 똑같이 콘솔에 찍으면서, 동시에 최근 줄들을 버퍼에 남겨서
+// 서버로 주기적으로 올린다 - 사람이 콘솔 내용을 일일이 복사해서 보내지 않아도
+// 대시보드/서버 쪽에서 에이전트가 실제로 뭘 하고 있는지 바로 볼 수 있게 하기 위함.
+var (
+	consoleMu  sync.Mutex
+	consoleLog []string
+)
+
+func say(a ...any) {
+	line := fmt.Sprintln(a...)
+	fmt.Print(line)
+	consoleMu.Lock()
+	consoleLog = append(consoleLog, strings.TrimRight(line, "\n"))
+	if len(consoleLog) > 500 {
+		consoleLog = consoleLog[len(consoleLog)-500:]
+	}
+	consoleMu.Unlock()
+}
+
+func consoleSnapshot() string {
+	consoleMu.Lock()
+	defer consoleMu.Unlock()
+	return strings.Join(consoleLog, "\n")
+}
 
 // ---- 이 프로젝트 전용 기본값 (서버 쪽 설정과 동일) ----
 // defaultToken 은 소스에 넣지 않는다 (이 저장소는 public). 빌드할 때
@@ -62,8 +88,8 @@ var recordFiles = map[string]string{}
 
 func must(err error) {
 	if err != nil {
-		fmt.Println("오류:", err)
-		fmt.Println("아무 키나 누르면 종료합니다...")
+		say("오류:", err)
+		say("아무 키나 누르면 종료합니다...")
 		bufio.NewReader(os.Stdin).ReadString('\n')
 		os.Exit(1)
 	}
@@ -130,7 +156,7 @@ func merge(base *Config, o Config) {
 // ---------------- 다운로드 / 압축 해제 ----------------
 
 func downloadFile(url, dest string) error {
-	fmt.Println("다운로드 중:", url)
+	say("다운로드 중:", url)
 	resp, err := http.Get(url)
 	if err != nil {
 		return err
@@ -201,7 +227,7 @@ func ensurePrism() {
 	if _, err := os.Stat(cfg.PrismPath); err == nil {
 		return
 	}
-	fmt.Println(">>> Prism Launcher 가 없어서 자동으로 설치합니다...")
+	say(">>> Prism Launcher 가 없어서 자동으로 설치합니다...")
 	resp, err := http.Get(prismReleaseAPI)
 	must(err)
 	defer resp.Body.Close()
@@ -235,7 +261,7 @@ func ensurePrism() {
 	cfg.PrismPath = found
 	// 포터블 모드 표시 파일 (Prism 은 exe 옆에 이 파일이 있으면 설정을 exe 폴더 기준으로 저장한다)
 	os.WriteFile(filepath.Join(filepath.Dir(found), "portable.txt"), []byte(""), 0644)
-	fmt.Println(">>> Prism Launcher 설치 완료:", found)
+	say(">>> Prism Launcher 설치 완료:", found)
 }
 
 func prismDataDir() string {
@@ -257,7 +283,7 @@ func ensurePrismSettings() {
 		"ApplicationTheme=system\n" +
 		"IconTheme=pe_colored\n"
 	must(os.WriteFile(path, []byte(content), 0644))
-	fmt.Println(">>> Prism 설정 마법사 비활성화 완료")
+	say(">>> Prism 설정 마법사 비활성화 완료")
 }
 
 // ---------------- 부트스트랩: Java 런타임 ----------------
@@ -271,7 +297,7 @@ func ensureJava() string {
 	if _, err := os.Stat(javaw); err == nil {
 		return javaw
 	}
-	fmt.Println(">>> Java 런타임이 없어서 자동으로 설치합니다...")
+	say(">>> Java 런타임이 없어서 자동으로 설치합니다...")
 	zipPath := filepath.Join(os.TempDir(), "jre.zip")
 	must(downloadFile("https://api.adoptium.net/v3/binary/latest/21/ga/windows/x64/jre/hotspot/normal/eclipse", zipPath))
 	jreDir := filepath.Join(exeDir, "jre")
@@ -282,7 +308,7 @@ func ensureJava() string {
 	if found == "" {
 		must(fmt.Errorf("압축 해제 후 javaw.exe 를 찾지 못했습니다"))
 	}
-	fmt.Println(">>> Java 설치 완료:", found)
+	say(">>> Java 설치 완료:", found)
 	return found
 }
 
@@ -311,9 +337,9 @@ func ensureInstance(javaPath string) {
   "formatVersion": 1
 }`
 		must(os.WriteFile(filepath.Join(instDir, "mmc-pack.json"), []byte(mmcPack), 0644))
-		fmt.Println(">>> 인스턴스 생성 완료")
+		say(">>> 인스턴스 생성 완료")
 	} else {
-		fmt.Println(">>> 인스턴스 Java 경로 갱신 완료")
+		say(">>> 인스턴스 Java 경로 갱신 완료")
 	}
 }
 
@@ -348,16 +374,16 @@ func ensureAccount() {
 	if data, err := os.ReadFile(accPath); err == nil && len(data) > 100 {
 		return // 이미 로그인된 계정이 있다고 가정
 	}
-	fmt.Println(">>> 마인크래프트 계정 로그인이 필요합니다.")
+	say(">>> 마인크래프트 계정 로그인이 필요합니다.")
 
 	dev := postForm("https://login.microsoftonline.com/consumers/oauth2/v2.0/devicecode", url.Values{
 		"client_id": {msaClientID}, "scope": {"XboxLive.SignIn XboxLive.offline_access"},
 	})
-	fmt.Println()
-	fmt.Println(">>> 아래 주소를 열고 코드를 입력해 로그인하세요:")
-	fmt.Println(">>>", dev["verification_uri"])
-	fmt.Println(">>> 코드:", dev["user_code"])
-	fmt.Println()
+	say()
+	say(">>> 아래 주소를 열고 코드를 입력해 로그인하세요:")
+	say(">>>", dev["verification_uri"])
+	say(">>> 코드:", dev["user_code"])
+	say()
 
 	deviceCode := dev["device_code"].(string)
 	interval := 5.0
@@ -373,7 +399,7 @@ func ensureAccount() {
 		})
 		if e, ok := resp["error"].(string); ok {
 			if e == "authorization_pending" {
-				fmt.Println("...아직 로그인 안 함, 계속 기다림")
+				say("...아직 로그인 안 함, 계속 기다림")
 				continue
 			}
 			if e == "slow_down" {
@@ -385,7 +411,7 @@ func ensureAccount() {
 		msToken = resp
 		break
 	}
-	fmt.Println(">>> Microsoft 로그인 완료. Xbox Live 인증 중...")
+	say(">>> Microsoft 로그인 완료. Xbox Live 인증 중...")
 
 	msAccess := msToken["access_token"].(string)
 	xbl := postJSON("https://user.auth.xboxlive.com/user/authenticate", map[string]any{
@@ -401,7 +427,7 @@ func ensureAccount() {
 	}, map[string]string{"x-xbl-contract-version": "1"})
 	xstsToken := xsts["Token"].(string)
 
-	fmt.Println(">>> 마인크래프트 토큰 발급 중...")
+	say(">>> 마인크래프트 토큰 발급 중...")
 	mc := postJSON("https://api.minecraftservices.com/authentication/login_with_xbox", map[string]any{
 		"identityToken": fmt.Sprintf("XBL3.0 x=%s;%s", uhs, xstsToken),
 	}, nil)
@@ -419,7 +445,7 @@ func ensureAccount() {
 		must(fmt.Errorf("이 계정은 마인크래프트를 소유하지 않은 것 같습니다: %v", profile))
 	}
 	profileName := profile["name"].(string)
-	fmt.Println(">>> 연결됨:", profileName, "("+profileID+")")
+	say(">>> 연결됨:", profileName, "("+profileID+")")
 
 	now := time.Now().Unix()
 	expiresIn, _ := msToken["expires_in"].(float64)
@@ -441,7 +467,7 @@ func ensureAccount() {
 	data := map[string]any{"formatVersion": 3, "accounts": []any{account}}
 	b, _ := json.MarshalIndent(data, "", "  ")
 	must(os.WriteFile(accPath, b, 0644))
-	fmt.Println(">>> 계정 저장 완료:", profileName)
+	say(">>> 계정 저장 완료:", profileName)
 	if cfg.Profile == "" {
 		cfg.Profile = profileName
 	}
@@ -453,7 +479,7 @@ func ensureFFmpeg() {
 	if _, err := os.Stat(cfg.FFmpegPath); err == nil {
 		return
 	}
-	fmt.Println(">>> ffmpeg 가 없어서 자동으로 설치합니다...")
+	say(">>> ffmpeg 가 없어서 자동으로 설치합니다...")
 	zipPath := filepath.Join(os.TempDir(), "ffmpeg.zip")
 	must(downloadFile(ffmpegZipURL, zipPath))
 	installDir := filepath.Join(exeDir, "ffmpeg")
@@ -465,7 +491,7 @@ func ensureFFmpeg() {
 		must(fmt.Errorf("압축 해제 후 ffmpeg.exe 를 찾지 못했습니다"))
 	}
 	cfg.FFmpegPath = found
-	fmt.Println(">>> ffmpeg 설치 완료:", found)
+	say(">>> ffmpeg 설치 완료:", found)
 }
 
 // ---------------- 서버와의 통신 ----------------
@@ -476,23 +502,32 @@ func heartbeat() bool {
 	body, _ := json.Marshal(map[string]string{"token": cfg.Token})
 	resp, err := http.Post(apiURL("/api/agent/heartbeat"), "application/json", bytes.NewReader(body))
 	if err != nil {
-		fmt.Println("하트비트 실패:", err, "- 5초 후 재시도")
+		say("하트비트 실패:", err, "- 5초 후 재시도")
 		return false
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
 		body, _ := io.ReadAll(resp.Body)
-		fmt.Println("하트비트 거부됨 (", resp.StatusCode, "):", string(body))
+		say("하트비트 거부됨 (", resp.StatusCode, "):", string(body))
 		return false
 	}
 	return true
+}
+
+func pushLog() {
+	body, _ := json.Marshal(map[string]string{"token": cfg.Token, "log": consoleSnapshot()})
+	resp, err := http.Post(apiURL("/api/agent/log"), "application/json", bytes.NewReader(body))
+	if err != nil {
+		return // 콘솔에 또 찍으면 그게 또 로그에 남아서 반복될 수 있으니 조용히 무시
+	}
+	resp.Body.Close()
 }
 
 func poll() []Command {
 	u := apiURL("/api/agent/poll") + "?token=" + url.QueryEscape(cfg.Token)
 	resp, err := http.Get(u)
 	if err != nil {
-		fmt.Println("poll 실패:", err)
+		say("poll 실패:", err)
 		return nil
 	}
 	defer resp.Body.Close()
@@ -507,7 +542,7 @@ func ack(id string, result map[string]any) {
 	body, _ := json.Marshal(map[string]any{"token": cfg.Token, "id": id, "result": result})
 	resp, err := http.Post(apiURL("/api/agent/ack"), "application/json", bytes.NewReader(body))
 	if err != nil {
-		fmt.Println("ack 실패:", err)
+		say("ack 실패:", err)
 		return
 	}
 	resp.Body.Close()
@@ -548,9 +583,9 @@ func handleLaunch() map[string]any {
 	go func() {
 		time.Sleep(10 * time.Second)
 		data, _ := os.ReadFile(logPath)
-		fmt.Println(">>> ---- Prism 실행 로그 (실행 후 10초) ----")
-		fmt.Println(string(data))
-		fmt.Println(">>> ---- 로그 끝 (이 창에 뜬 내용을 그대로 복사해서 보내주세요) ----")
+		say(">>> ---- Prism 실행 로그 (실행 후 10초) ----")
+		say(string(data))
+		say(">>> ---- 로그 끝 (이 창에 뜬 내용을 그대로 복사해서 보내주세요) ----")
 	}()
 	return map[string]any{"ok": true}
 }
@@ -673,15 +708,15 @@ func ensureAutostart() {
 	cmd := exec.Command("reg", "add", `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`,
 		"/v", "mcbuildaiAgent", "/t", "REG_SZ", "/d", `"`+exe+`"`, "/f")
 	if err := cmd.Run(); err != nil {
-		fmt.Println("(참고) 자동 시작 등록 실패 - 매번 직접 실행해야 합니다:", err)
+		say("(참고) 자동 시작 등록 실패 - 매번 직접 실행해야 합니다:", err)
 	} else {
-		fmt.Println(">>> Windows 시작 시 자동 실행 등록됨")
+		say(">>> Windows 시작 시 자동 실행 등록됨")
 	}
 }
 
 func main() {
 	loadConfig()
-	fmt.Println("=== mcbuildai 촬영 에이전트 ===")
+	say("=== mcbuildai 촬영 에이전트 ===")
 	ensureAutostart()
 	ensurePrism()
 	ensurePrismSettings()
@@ -689,27 +724,32 @@ func main() {
 	ensureInstance(javaPath)
 	ensureAccount()
 	ensureFFmpeg()
-	fmt.Println()
-	fmt.Println(">>> 준비 완료! 서버에 연결합니다:", cfg.ServerURL)
+	say()
+	say(">>> 준비 완료! 서버에 연결합니다:", cfg.ServerURL)
 
 	lastHeartbeat := time.Now().Add(-time.Hour)
 	lastStatusPrint := time.Now().Add(-time.Hour)
+	lastLogPush := time.Now().Add(-time.Hour)
 	wasOnline := false
 	for {
 		if time.Since(lastHeartbeat) > 10*time.Second {
 			ok := heartbeat()
 			lastHeartbeat = time.Now()
 			if ok && !wasOnline {
-				fmt.Println(">>> 서버 연결됨. 명령을 기다립니다. (이 창을 열어두세요)")
+				say(">>> 서버 연결됨. 명령을 기다립니다. (이 창을 열어두세요)")
 			}
 			wasOnline = ok
 		}
 		if wasOnline && time.Since(lastStatusPrint) > 60*time.Second {
-			fmt.Println("... 정상 작동 중 (", time.Now().Format("15:04:05"), ")")
+			say("... 정상 작동 중 (", time.Now().Format("15:04:05"), ")")
 			lastStatusPrint = time.Now()
 		}
+		if time.Since(lastLogPush) > 5*time.Second {
+			pushLog()
+			lastLogPush = time.Now()
+		}
 		for _, c := range poll() {
-			fmt.Println("명령 수신:", c.Type, c.Name)
+			say("명령 수신:", c.Type, c.Name)
 			go handle(c)
 		}
 		time.Sleep(2 * time.Second)
