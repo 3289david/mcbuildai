@@ -73,25 +73,34 @@ class Rcon:
         return pid, ptype, data[8:-2].decode("utf-8", errors="replace")
 
     def command(self, cmd: str) -> str:
-        """명령 실행. 긴 응답이 여러 패킷으로 나뉘는 경우를 위해 빈 마커 요청을 함께 보낸다."""
+        """명령 실행. 연결이 끊어져 있으면 한 번 재연결해서 재시도한다 (예: RCON 유휴 타임아웃으로
+        끊긴 뒤 player_online() 같은 폴링 루프가 장시간 반복 호출하는 경우)."""
         with self._lock:
-            if not self.sock:
-                self.connect()
             try:
-                rid = self._send(self.EXEC, cmd)
-                marker = self._send(self.RESPONSE, "")
-                out = []
-                while True:
-                    pid, ptype, body = self._recv()
-                    if pid == marker:
-                        # 바닐라 서버는 잘못된 패킷 유형에 'Unknown request' 를 돌려준다
-                        break
-                    if pid == rid:
-                        out.append(body)
-                return "".join(out)
-            except (OSError, struct.error) as e:
+                return self._command_once(cmd)
+            except (OSError, struct.error, RconError):
                 self.close()
-                raise RconError(f"RCON 명령 실패: {e}") from e
+                self.connect()
+                return self._command_once(cmd)
+
+    def _command_once(self, cmd: str) -> str:
+        if not self.sock:
+            self.connect()
+        try:
+            rid = self._send(self.EXEC, cmd)
+            marker = self._send(self.RESPONSE, "")
+            out = []
+            while True:
+                pid, ptype, body = self._recv()
+                if pid == marker:
+                    # 바닐라 서버는 잘못된 패킷 유형에 'Unknown request' 를 돌려준다
+                    break
+                if pid == rid:
+                    out.append(body)
+            return "".join(out)
+        except (OSError, struct.error) as e:
+            self.close()
+            raise RconError(f"RCON 명령 실패: {e}") from e
 
     def commands(self, cmds: list[str]) -> list[str]:
         """여러 명령을 파이프라인으로 보내 왕복 지연을 줄인다."""
