@@ -27,11 +27,13 @@ DEFAULTS: dict[str, Any] = {
         "localize_ko": True,           # YouTube 메타데이터에 한국어 번역도 함께 등록
     },
     "generator": {
-        "engine": "auto",              # auto(genMC 우선, 실패 시 내장 생성기) / genmc / procedural
+        "engine": "genmc",             # genmc(항상 genMC, 실패 시 중단) / auto(실패 시 내장 생성기로 대체) / procedural
     },
     "genmc": {
         "mcp_url": "https://genmc.app/api/mcp",
         "export_version": "1.21.1",    # 서버 Minecraft 버전과 맞춘다
+        "anthropic_api_key_env": "ANTHROPIC_API_KEY",  # genMC 도구 호출은 항상 Anthropic 네이티브 키가 필요함 (ai.provider 와 무관)
+        "model": "claude-sonnet-5-5",
     },
     "planner": {
         "horizon_days": 7,
@@ -94,6 +96,7 @@ DEFAULTS: dict[str, Any] = {
     "build": {
         "origin": [0, 64, 0],          # 건축 원점
         "blocks_per_second": 400,      # 기본 건축 속도
+        "min_blocks": 50000,           # 건축물 기본 최소 블록 수 목표
         "max_commands_per_batch": 200,
         "verify": True,
         "verify_sample": 0.25,         # 검증할 블록 비율

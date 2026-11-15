@@ -17,21 +17,23 @@ class AIUnavailable(RuntimeError):
 
 
 class AIClient:
-    def __init__(self, cfg: Config):
+    def __init__(self, cfg: Config, provider: str | None = None, api_key_env: str | None = None,
+                 model: str | None = None):
         self.cfg = cfg
-        self.model = cfg.get("ai.model")
-        self.provider = cfg.get("ai.provider", "anthropic")
+        self.model = model or cfg.get("ai.model")
+        self.provider = provider or cfg.get("ai.provider", "anthropic")
+        self._api_key_env = api_key_env or cfg.get("ai.api_key_env")
         self._client = None
 
     def available(self) -> bool:
-        return bool(os.environ.get(self.cfg.get("ai.api_key_env"), ""))
+        return bool(os.environ.get(self._api_key_env, ""))
 
     @property
     def client(self):
         if self._client is None:
             if not self.available():
-                raise AIUnavailable(f"환경 변수 {self.cfg.get('ai.api_key_env')} 가 설정되지 않았습니다")
-            api_key = os.environ[self.cfg.get("ai.api_key_env")]
+                raise AIUnavailable(f"환경 변수 {self._api_key_env} 가 설정되지 않았습니다")
+            api_key = os.environ[self._api_key_env]
             if self.provider == "openrouter":
                 # OpenRouter 는 OpenAI 호환 API 라서 openai SDK 를 base_url 만 바꿔서 쓴다.
                 import openai

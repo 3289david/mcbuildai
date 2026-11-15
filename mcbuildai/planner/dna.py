@@ -69,17 +69,17 @@ SCALES: dict[str, dict] = {
 
 # 종류별 허용 규모
 TYPE_SCALES: dict[str, list[str]] = {
-    "house": ["small", "medium"],
-    "mansion": ["medium", "large"],
-    "tower": ["small", "medium", "large"],
+    "house": ["small", "medium", "large"],
+    "mansion": ["medium", "large", "huge"],
+    "tower": ["small", "medium", "large", "huge"],
     "castle": ["large", "huge", "mega"],
     "temple": ["medium", "large", "huge"],
-    "cathedral": ["large", "huge"],
-    "skyscraper": ["medium", "large", "huge"],
-    "pagoda": ["small", "medium", "large"],
-    "lighthouse": ["small", "medium"],
+    "cathedral": ["large", "huge", "mega"],
+    "skyscraper": ["medium", "large", "huge", "mega"],
+    "pagoda": ["small", "medium", "large", "huge"],
+    "lighthouse": ["small", "medium", "large"],
     "ziggurat": ["large", "huge", "mega"],
-    "hanok": ["medium", "large"],
+    "hanok": ["medium", "large", "huge"],
     "citadel": ["huge", "mega"],
 }
 
@@ -183,7 +183,11 @@ def random_dna(rng: random.Random, weights: dict[str, dict[str, float]] | None =
 
     btype = pick("btype", list(BUILDING_TYPES))
     style = pick("style", TYPE_STYLES[btype])
-    scale = pick("scale", TYPE_SCALES[btype])
+    # 기본적으로 블록 수가 충분히 큰(50000+) 건축물이 되도록, 종류별로 허용되는 규모 중
+    # 가장 큰 상위 2개로만 고른다 (완전히 고정하면 변화가 없어서 중복 방지 로직과 충돌한다).
+    scale_opts = TYPE_SCALES[btype]
+    big_opts = scale_opts[-2:] if len(scale_opts) > 1 else scale_opts
+    scale = pick("scale", big_opts)
     palette = pick("palette", STYLES[style]["palettes"])
     roof_opts = STYLES[style]["roofs"]
     if btype in ("pagoda",):

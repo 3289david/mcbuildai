@@ -34,7 +34,8 @@ def estimate(model: VoxelModel, cfg: Config) -> tuple[float, float]:
     return diff, minutes
 
 
-def brief_from_dna(dna: BuildingDNA, name: str, concept: str, user_prompt: str | None = None) -> str:
+def brief_from_dna(dna: BuildingDNA, name: str, concept: str, user_prompt: str | None = None,
+                   min_blocks: int = 0) -> str:
     P = PALETTES[dna.palette]
     lines = [
         f"건축물 이름: {name}",
@@ -48,6 +49,10 @@ def brief_from_dna(dna: BuildingDNA, name: str, concept: str, user_prompt: str |
         f"내부 공간: {'층별 방, 계단, 조명 포함' if dna.interior else '외관 위주'}",
         f"콘셉트: {concept}",
     ]
+    if min_blocks:
+        lines.append(f"중요: 완성된 건축물은 반드시 블록 {min_blocks:,}개 이상이어야 한다. "
+                     f"바닥/치수를 충분히 넓히고, 디테일(기둥, 장식, 내부 구조, 주변 조경)을 "
+                     f"풍성하게 채워서 목표 블록 수를 넘기도록 설계해라.")
     if user_prompt:
         lines.append(f"사용자 요청: {user_prompt}")
     return "\n".join(lines)
@@ -76,12 +81,17 @@ def create_building(cfg: Config, db: DB, dna: BuildingDNA, name: str, concept: s
          concept, dna.timelapse_style, dna.camera_style))
     work_dir = cfg.path_of("paths.output_dir") / "buildings" / f"{bid:05d}_{slugify(name)}"
     meta: dict = {"engine": None}
+    min_blocks = int(cfg.get("build.min_blocks", 0))
     try:
         model = None
         if engine in ("auto", "genmc"):
             from mcbuildai.planner.ai_client import AIClient, AIUnavailable
             from .genmc import GenMC, GenMCDesigner, GenMCError
-            ai = AIClient(cfg)
+            # genMC 의 도구 호출 루프는 Anthropic 네이티브 tool_use 스키마가 필요해서,
+            # 글로벌 ai.provider(비용 절감용 OpenRouter)와 무관하게 항상 전용 Anthropic 클라이언트를 쓴다.
+            ai = AIClient(cfg, provider="anthropic",
+                         api_key_env=cfg.get("genmc.anthropic_api_key_env", "ANTHROPIC_API_KEY"),
+                         model=cfg.get("genmc.model", "claude-sonnet-5-5"))
             gm = GenMC(cfg, db)
             if ai.available() and gm.resume_key:
                 try:
@@ -90,8 +100,8 @@ def create_building(cfg: Config, db: DB, dna: BuildingDNA, name: str, concept: s
                         r = db.one("SELECT name FROM buildings WHERE id=?", (base_building_id,))
                         base_name = r["name"] if r else None
                     res = GenMCDesigner(cfg, db, ai, gm).design(
-                        brief_from_dna(dna, name, concept, user_prompt), name, work_dir, images=images,
-                        base_project=base_name)
+                        brief_from_dna(dna, name, concept, user_prompt, min_blocks=min_blocks), name, work_dir,
+                        images=images, base_project=base_name)
                     model = auto_label(normalize(res.model))
                     if not any(v.part == "terrain" for v in model.blocks.values()):
                         import random
@@ -101,6 +111,9 @@ def create_building(cfg: Config, db: DB, dna: BuildingDNA, name: str, concept: s
                     meta.update(engine="genmc", genmc_summary=res.summary, genmc_parts=res.parts,
                                 genmc_skipped_lines=res.skipped_lines,
                                 genmc_render=str(res.preview_png) if res.preview_png else None)
+                    if min_blocks and len(model) < min_blocks:
+                        db.log("WARN", "generator", f"[{bid}] genMC 결과가 목표 블록 수({min_blocks:,})에 "
+                                                     f"못 미침: {len(model):,}")
                 except (GenMCError, AIUnavailable) as e:
                     if engine == "genmc":
                         raise
@@ -111,15 +124,25 @@ def create_building(cfg: Config, db: DB, dna: BuildingDNA, name: str, concept: s
             from .building import generate
             model = generate(dna)
             meta["engine"] = "procedural"
+            attempts = 0
+            while min_blocks and len(model) < min_blocks and attempts < 4:
+                attempts += 1
+                dna.width = int(dna.width * 1.35) | 1
+                dna.depth = int(dna.depth * 1.35) | 1
+                dna.floors = dna.floors + 2
+                model = generate(dna)
+            if min_blocks and len(model) < min_blocks:
+                db.log("WARN", "generator", f"[{bid}] 절차적 생성기가 목표 블록 수({min_blocks:,})에 "
+                                             f"못 미침 ({attempts}회 확장 후): {len(model):,}")
         files = save_building_files(model, work_dir, cfg)
         diff, minutes = estimate(model, cfg)
         (work_dir / "meta.json").write_text(json.dumps({**meta, "dna": json.loads(dna.to_json()), "name": name,
                                                         "concept": concept}, ensure_ascii=False, indent=1),
                                             encoding="utf-8")
         db.execute("UPDATE buildings SET block_count=?, difficulty=?, est_minutes=?, schematic_path=?, "
-                   "preview_path=?, status='generated' WHERE id=?",
+                   "preview_path=?, dna_json=?, status='generated' WHERE id=?",
                    (len(model), diff, minutes, files["schematic_path"],
-                    meta.get("genmc_render") or files["preview_path"], bid))
+                    meta.get("genmc_render") or files["preview_path"], dna.to_json(), bid))
         db.log("INFO", "generator", f"[{bid}] {name} 생성 완료 ({meta['engine']}, {len(model)} 블록)")
         return bid
     except Exception as e:
