@@ -413,6 +413,12 @@ func ensureAccount() {
 	}
 	say(">>> Microsoft 로그인 완료. Xbox Live 인증 중...")
 
+	finishLogin(msToken, accPath)
+}
+
+// msToken(최초 로그인 또는 refresh_token 갱신으로 얻은 것) 으로 Xbox Live -> XSTS -> 마인크래프트
+// 순서를 거쳐 accounts.json 을 (다시) 쓴다. ensureAccount() 와 refreshAccountIfNeeded() 가 공유한다.
+func finishLogin(msToken map[string]any, accPath string) {
 	msAccess := msToken["access_token"].(string)
 	xbl := postJSON("https://user.auth.xboxlive.com/user/authenticate", map[string]any{
 		"Properties": map[string]any{"AuthMethod": "RPS", "SiteName": "user.auth.xboxlive.com", "RpsTicket": "d=" + msAccess},
@@ -467,10 +473,53 @@ func ensureAccount() {
 	data := map[string]any{"formatVersion": 3, "accounts": []any{account}}
 	b, _ := json.MarshalIndent(data, "", "  ")
 	must(os.WriteFile(accPath, b, 0644))
-	say(">>> 계정 저장 완료:", profileName)
+	say(">>> 계정 저장(갱신) 완료:", profileName)
 	if cfg.Profile == "" {
 		cfg.Profile = profileName
 	}
+}
+
+// Microsoft 액세스 토큰은 보통 1시간 정도만 유효한데, 실제 촬영 작업은 하루 중 아무 때나
+// (며칠 뒤에) 들어올 수 있어서 부트스트랩 때 받은 토큰은 거의 항상 만료된 상태로 launch
+// 시점을 맞는다. Prism 은 만료된 토큰을 조용히 새로고침 시도하다 멈추는 것으로 보여서
+// (Got translations index! 이후 아무 로그도 없이 영원히 멈춤 - Linux 쪽에서도 똑같이
+// 겪은 증상), launch 직전에 우리가 먼저 refresh_token 으로 갱신해서 항상 싱싱한 토큰으로
+// 넘겨준다.
+func refreshAccountIfNeeded() {
+	accPath := filepath.Join(prismDataDir(), "accounts.json")
+	data, err := os.ReadFile(accPath)
+	if err != nil {
+		return
+	}
+	var parsed struct {
+		Accounts []struct {
+			MSA struct {
+				Exp          int64  `json:"exp"`
+				RefreshToken string `json:"refresh_token"`
+			} `json:"msa"`
+		} `json:"accounts"`
+	}
+	if json.Unmarshal(data, &parsed) != nil || len(parsed.Accounts) == 0 {
+		return
+	}
+	acc := parsed.Accounts[0]
+	if acc.MSA.Exp > time.Now().Unix()+60 {
+		return // 아직 1분 이상 여유 있음
+	}
+	if acc.MSA.RefreshToken == "" {
+		say(">>> 경고: 계정 토큰이 만료됐는데 refresh_token 이 없습니다 (재로그인 필요할 수 있음)")
+		return
+	}
+	say(">>> 계정 토큰이 만료돼서 갱신합니다...")
+	msToken := postForm("https://login.microsoftonline.com/consumers/oauth2/v2.0/token", url.Values{
+		"client_id": {msaClientID}, "grant_type": {"refresh_token"}, "refresh_token": {acc.MSA.RefreshToken},
+		"scope": {"XboxLive.SignIn XboxLive.offline_access"},
+	})
+	if e, ok := msToken["error"].(string); ok {
+		say(">>> 토큰 갱신 실패:", e, "- 기존 토큰으로 그냥 시도합니다")
+		return
+	}
+	finishLogin(msToken, accPath)
 }
 
 // ---------------- 부트스트랩: ffmpeg ----------------
@@ -556,6 +605,7 @@ func psSendKey(key string) {
 }
 
 func handleLaunch() map[string]any {
+	refreshAccountIfNeeded()
 	args := []string{"-l", cfg.Instance, "-s", cfg.JoinServer}
 	if cfg.Profile != "" {
 		args = append(args, "-a", cfg.Profile)
