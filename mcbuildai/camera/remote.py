@@ -19,7 +19,11 @@ class RemoteClientManager:
 
     def launch(self) -> None:
         cid = HUB.push_command({"type": "launch"})
-        HUB.wait_result(cid, timeout=30)
+        res = HUB.wait_result(cid, timeout=30)
+        if not res.get("ok"):
+            # 이걸 그냥 무시하고 넘어가면 실제론 실행 자체가 실패했는데도 player_online() 폴링이
+            # 12분 꽉 채우고 나서야 애매한 "접속 안 함" 에러로 실패해서 원인을 알 수 없었다.
+            raise RuntimeError(f"에이전트에서 마인크래프트 실행 실패: {res.get('error', '알 수 없는 오류')}")
 
     def wait_until_online(self, is_online, timeout: float) -> None:
         end = time.time() + timeout
