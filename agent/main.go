@@ -525,11 +525,33 @@ func handleLaunch() map[string]any {
 	if cfg.Profile != "" {
 		args = append(args, "-a", cfg.Profile)
 	}
+	// Prism 의 실제 출력(라이브러리 다운로드, 계정 인증, 크래시 등)을 파일로 받아서 실행 후
+	// 몇 초 뒤 콘솔에 그대로 찍어준다 - 창이 안 뜨는 이유를 사람이 직접 Prism GUI 를 파고들지
+	// 않고도 이 콘솔만 보고 알 수 있게 하기 위함.
+	logPath := filepath.Join(exeDir, "prism_launch.log")
+	logFile, err := os.Create(logPath)
+	if err != nil {
+		return map[string]any{"ok": false, "error": err.Error()}
+	}
 	cmd := exec.Command(cfg.PrismPath, args...)
+	cmd.Stdout = logFile
+	cmd.Stderr = logFile
 	if err := cmd.Start(); err != nil {
+		logFile.Close()
 		return map[string]any{"ok": false, "error": err.Error()}
 	}
 	launchProc = cmd.Process
+	go func() {
+		cmd.Wait() // 좀비 프로세스 방지용 (출력은 이미 파일로 가고 있어서 결과는 안 봄)
+		logFile.Close()
+	}()
+	go func() {
+		time.Sleep(10 * time.Second)
+		data, _ := os.ReadFile(logPath)
+		fmt.Println(">>> ---- Prism 실행 로그 (실행 후 10초) ----")
+		fmt.Println(string(data))
+		fmt.Println(">>> ---- 로그 끝 (이 창에 뜬 내용을 그대로 복사해서 보내주세요) ----")
+	}()
 	return map[string]any{"ok": true}
 }
 
