@@ -589,9 +589,26 @@ func handle(c Command) {
 	ack(c.ID, result)
 }
 
+func ensureAutostart() {
+	exe, err := os.Executable()
+	if err != nil {
+		return
+	}
+	// Windows 로그인 시 자동 실행 등록 (완전 자동화: 사람이 매번 수동으로 켜지 않아도 됨).
+	// 실패해도 치명적이지 않음 - 그래도 지금 실행은 계속 진행한다.
+	cmd := exec.Command("reg", "add", `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`,
+		"/v", "mcbuildaiAgent", "/t", "REG_SZ", "/d", `"`+exe+`"`, "/f")
+	if err := cmd.Run(); err != nil {
+		fmt.Println("(참고) 자동 시작 등록 실패 - 매번 직접 실행해야 합니다:", err)
+	} else {
+		fmt.Println(">>> Windows 시작 시 자동 실행 등록됨")
+	}
+}
+
 func main() {
 	loadConfig()
 	fmt.Println("=== mcbuildai 촬영 에이전트 ===")
+	ensureAutostart()
 	ensurePrism()
 	ensureInstance()
 	ensureAccount()
