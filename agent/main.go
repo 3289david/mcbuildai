@@ -1,9 +1,11 @@
 // mcbuildai Windows 촬영 에이전트.
-// 서버(yt.audest.me)에 폴링으로 접속해서, 서버가 카메라를 RCON으로 움직이는 동안
-// 이 PC에서 마인크래프트를 실행하고 화면을 녹화해서 서버로 올려준다.
+// 처음 실행하면 Prism Launcher, ffmpeg, 마인크래프트 인스턴스, 계정 로그인까지 전부 알아서 준비하고,
+// 그 다음부터는 서버에 접속해서 카메라 녹화를 위임받아 처리한다.
 package main
 
 import (
+	"archive/zip"
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"fmt"
@@ -18,15 +20,31 @@ import (
 	"time"
 )
 
+// ---- 이 프로젝트 전용 기본값 (서버 쪽 설정과 동일) ----
+// defaultToken 은 소스에 넣지 않는다 (이 저장소는 public). 빌드할 때
+// -ldflags "-X main.defaultToken=실제토큰" 으로 주입한다.
+const (
+	defaultServerURL   = "https://yt.audest.me"
+	defaultInstance    = "BuildCam"
+	defaultProfile     = "davvid3289"
+	defaultJoinServer  = "audestyt.gamehost.kr:1035"
+	defaultWindowTitle = "Minecraft* 1.21.1"
+	msaClientID        = "c36a9fb6-4f2a-41ff-90bd-ae7cc92031eb" // Prism Launcher 공개 Azure 앱 ID
+	prismReleaseAPI    = "https://api.github.com/repos/PrismLauncher/PrismLauncher/releases/latest"
+	ffmpegZipURL       = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip"
+)
+
+var defaultToken = "" // ldflags -X 로 빌드 시점에 주입, 소스에는 비워둠
+
 type Config struct {
-	ServerURL      string `json:"server_url"`
-	Token          string `json:"token"`
-	PrismPath      string `json:"prism_path"`
-	Instance       string `json:"instance"`
-	Profile        string `json:"profile"`
-	JoinServer     string `json:"join_server"`
-	WindowTitle    string `json:"window_title"`
-	FFmpegPath     string `json:"ffmpeg_path"`
+	ServerURL   string `json:"server_url"`
+	Token       string `json:"token"`
+	PrismPath   string `json:"prism_path"`
+	Instance    string `json:"instance"`
+	Profile     string `json:"profile"`
+	JoinServer  string `json:"join_server"`
+	WindowTitle string `json:"window_title"`
+	FFmpegPath  string `json:"ffmpeg_path"`
 }
 
 type Command struct {
@@ -37,34 +55,370 @@ type Command struct {
 }
 
 var cfg Config
+var exeDir string
 var launchProc *os.Process
 var recordings = map[string]*exec.Cmd{}
 var recordFiles = map[string]string{}
 
-func loadConfig() {
-	exe, _ := os.Executable()
-	dir := filepath.Dir(exe)
-	data, err := os.ReadFile(filepath.Join(dir, "agent.json"))
+func must(err error) {
 	if err != nil {
-		fmt.Println("agent.json 을 읽을 수 없습니다:", err)
-		fmt.Println("agent.json.example 을 참고해서 같은 폴더에 agent.json 을 만들어주세요.")
+		fmt.Println("오류:", err)
+		fmt.Println("아무 키나 누르면 종료합니다...")
+		bufio.NewReader(os.Stdin).ReadString('\n')
 		os.Exit(1)
-	}
-	if err := json.Unmarshal(data, &cfg); err != nil {
-		fmt.Println("agent.json 파싱 실패:", err)
-		os.Exit(1)
-	}
-	if cfg.WindowTitle == "" {
-		cfg.WindowTitle = "Minecraft"
-	}
-	if cfg.FFmpegPath == "" {
-		cfg.FFmpegPath = "ffmpeg.exe"
 	}
 }
 
-func apiURL(path string) string {
-	return strings.TrimRight(cfg.ServerURL, "/") + path
+// ---------------- 설정 ----------------
+
+func loadConfig() {
+	exe, _ := os.Executable()
+	exeDir = filepath.Dir(exe)
+	cfg = Config{
+		ServerURL:   defaultServerURL,
+		Token:       defaultToken,
+		Instance:    defaultInstance,
+		Profile:     defaultProfile,
+		JoinServer:  defaultJoinServer,
+		WindowTitle: defaultWindowTitle,
+	}
+	data, err := os.ReadFile(filepath.Join(exeDir, "agent.json"))
+	if err == nil {
+		var override Config
+		if err := json.Unmarshal(data, &override); err == nil {
+			merge(&cfg, override)
+		}
+	}
+	if cfg.PrismPath == "" {
+		cfg.PrismPath = filepath.Join(exeDir, "PrismLauncher", "prismlauncher.exe")
+	}
+	if cfg.FFmpegPath == "" {
+		cfg.FFmpegPath = filepath.Join(exeDir, "ffmpeg", "ffmpeg.exe")
+	}
+	if cfg.Token == "" {
+		must(fmt.Errorf("토큰이 설정되지 않았습니다. exe 옆에 agent.json 을 만들고 token 값을 넣어주세요"))
+	}
 }
+
+func merge(base *Config, o Config) {
+	if o.ServerURL != "" {
+		base.ServerURL = o.ServerURL
+	}
+	if o.Token != "" {
+		base.Token = o.Token
+	}
+	if o.PrismPath != "" {
+		base.PrismPath = o.PrismPath
+	}
+	if o.Instance != "" {
+		base.Instance = o.Instance
+	}
+	if o.Profile != "" {
+		base.Profile = o.Profile
+	}
+	if o.JoinServer != "" {
+		base.JoinServer = o.JoinServer
+	}
+	if o.WindowTitle != "" {
+		base.WindowTitle = o.WindowTitle
+	}
+	if o.FFmpegPath != "" {
+		base.FFmpegPath = o.FFmpegPath
+	}
+}
+
+// ---------------- 다운로드 / 압축 해제 ----------------
+
+func downloadFile(url, dest string) error {
+	fmt.Println("다운로드 중:", url)
+	resp, err := http.Get(url)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return fmt.Errorf("다운로드 실패 (%d): %s", resp.StatusCode, url)
+	}
+	f, err := os.Create(dest)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	_, err = io.Copy(f, resp.Body)
+	return err
+}
+
+func unzip(zipPath, destDir string) error {
+	r, err := zip.OpenReader(zipPath)
+	if err != nil {
+		return err
+	}
+	defer r.Close()
+	for _, f := range r.File {
+		path := filepath.Join(destDir, f.Name)
+		if !strings.HasPrefix(path, filepath.Clean(destDir)+string(os.PathSeparator)) {
+			continue // zip slip 방지
+		}
+		if f.FileInfo().IsDir() {
+			os.MkdirAll(path, 0755)
+			continue
+		}
+		os.MkdirAll(filepath.Dir(path), 0755)
+		rc, err := f.Open()
+		if err != nil {
+			return err
+		}
+		out, err := os.Create(path)
+		if err != nil {
+			rc.Close()
+			return err
+		}
+		io.Copy(out, rc)
+		out.Close()
+		rc.Close()
+	}
+	return nil
+}
+
+// 압축 푼 폴더 아래서 특정 파일 이름을 재귀적으로 찾는다 (zip 안에 버전별 하위 폴더가 있는 경우 대응).
+func findFile(root, name string) string {
+	var found string
+	filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err != nil || found != "" {
+			return nil
+		}
+		if !d.IsDir() && strings.EqualFold(d.Name(), name) {
+			found = path
+		}
+		return nil
+	})
+	return found
+}
+
+// ---------------- 부트스트랩: Prism Launcher ----------------
+
+func ensurePrism() {
+	if _, err := os.Stat(cfg.PrismPath); err == nil {
+		return
+	}
+	fmt.Println(">>> Prism Launcher 가 없어서 자동으로 설치합니다...")
+	resp, err := http.Get(prismReleaseAPI)
+	must(err)
+	defer resp.Body.Close()
+	var rel struct {
+		Assets []struct {
+			Name               string `json:"name"`
+			BrowserDownloadURL string `json:"browser_download_url"`
+		} `json:"assets"`
+	}
+	must(json.NewDecoder(resp.Body).Decode(&rel))
+	var assetURL string
+	for _, a := range rel.Assets {
+		if strings.Contains(a.Name, "Windows-MSVC-Portable") && strings.HasSuffix(a.Name, ".zip") {
+			assetURL = a.BrowserDownloadURL
+			break
+		}
+	}
+	if assetURL == "" {
+		must(fmt.Errorf("Prism Launcher Windows 포터블 다운로드를 찾지 못했습니다"))
+	}
+	zipPath := filepath.Join(os.TempDir(), "prismlauncher.zip")
+	must(downloadFile(assetURL, zipPath))
+	installDir := filepath.Join(exeDir, "PrismLauncher")
+	os.MkdirAll(installDir, 0755)
+	must(unzip(zipPath, installDir))
+	os.Remove(zipPath)
+	found := findFile(installDir, "prismlauncher.exe")
+	if found == "" {
+		must(fmt.Errorf("압축 해제 후 prismlauncher.exe 를 찾지 못했습니다"))
+	}
+	cfg.PrismPath = found
+	// 포터블 모드 표시 파일 (Prism 은 exe 옆에 이 파일이 있으면 설정을 exe 폴더 기준으로 저장한다)
+	os.WriteFile(filepath.Join(filepath.Dir(found), "portable.txt"), []byte(""), 0644)
+	fmt.Println(">>> Prism Launcher 설치 완료:", found)
+}
+
+func prismDataDir() string {
+	return filepath.Dir(cfg.PrismPath)
+}
+
+// ---------------- 부트스트랩: BuildCam 인스턴스 ----------------
+
+func ensureInstance() {
+	instDir := filepath.Join(prismDataDir(), "instances", cfg.Instance)
+	cfgPath := filepath.Join(instDir, "instance.cfg")
+	if _, err := os.Stat(cfgPath); err == nil {
+		return
+	}
+	fmt.Println(">>> 마인크래프트 인스턴스를 만듭니다:", cfg.Instance)
+	os.MkdirAll(filepath.Join(instDir, ".minecraft"), 0755)
+	instanceCfg := "[General]\nConfigVersion=1.2\nInstanceType=OneSix\nname=" + cfg.Instance + "\niconKey=default\n"
+	must(os.WriteFile(cfgPath, []byte(instanceCfg), 0644))
+	mmcPack := `{
+  "components": [
+    {"important": true, "uid": "net.minecraft", "version": "1.21.1"},
+    {"uid": "net.fabricmc.fabric-loader", "version": "0.20.1"}
+  ],
+  "formatVersion": 1
+}`
+	must(os.WriteFile(filepath.Join(instDir, "mmc-pack.json"), []byte(mmcPack), 0644))
+	fmt.Println(">>> 인스턴스 생성 완료")
+}
+
+// ---------------- 부트스트랩: 마이크로소프트 계정 로그인 ----------------
+
+func postForm(u string, data url.Values) map[string]any {
+	resp, err := http.PostForm(u, data)
+	must(err)
+	defer resp.Body.Close()
+	var out map[string]any
+	json.NewDecoder(resp.Body).Decode(&out)
+	return out
+}
+
+func postJSON(u string, body map[string]any, headers map[string]string) map[string]any {
+	b, _ := json.Marshal(body)
+	req, _ := http.NewRequest("POST", u, bytes.NewReader(b))
+	req.Header.Set("Content-Type", "application/json")
+	for k, v := range headers {
+		req.Header.Set(k, v)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	must(err)
+	defer resp.Body.Close()
+	var out map[string]any
+	json.NewDecoder(resp.Body).Decode(&out)
+	return out
+}
+
+func ensureAccount() {
+	accPath := filepath.Join(prismDataDir(), "accounts.json")
+	if data, err := os.ReadFile(accPath); err == nil && len(data) > 100 {
+		return // 이미 로그인된 계정이 있다고 가정
+	}
+	fmt.Println(">>> 마인크래프트 계정 로그인이 필요합니다.")
+
+	dev := postForm("https://login.microsoftonline.com/consumers/oauth2/v2.0/devicecode", url.Values{
+		"client_id": {msaClientID}, "scope": {"XboxLive.SignIn XboxLive.offline_access"},
+	})
+	fmt.Println()
+	fmt.Println(">>> 아래 주소를 열고 코드를 입력해 로그인하세요:")
+	fmt.Println(">>>", dev["verification_uri"])
+	fmt.Println(">>> 코드:", dev["user_code"])
+	fmt.Println()
+
+	deviceCode := dev["device_code"].(string)
+	interval := 5.0
+	if v, ok := dev["interval"].(float64); ok {
+		interval = v
+	}
+	var msToken map[string]any
+	for {
+		time.Sleep(time.Duration(interval) * time.Second)
+		resp := postForm("https://login.microsoftonline.com/consumers/oauth2/v2.0/token", url.Values{
+			"client_id": {msaClientID}, "grant_type": {"urn:ietf:params:oauth:grant-type:device_code"},
+			"device_code": {deviceCode},
+		})
+		if e, ok := resp["error"].(string); ok {
+			if e == "authorization_pending" {
+				fmt.Println("...아직 로그인 안 함, 계속 기다림")
+				continue
+			}
+			if e == "slow_down" {
+				interval += 5
+				continue
+			}
+			must(fmt.Errorf("로그인 실패: %v", resp))
+		}
+		msToken = resp
+		break
+	}
+	fmt.Println(">>> Microsoft 로그인 완료. Xbox Live 인증 중...")
+
+	msAccess := msToken["access_token"].(string)
+	xbl := postJSON("https://user.auth.xboxlive.com/user/authenticate", map[string]any{
+		"Properties": map[string]any{"AuthMethod": "RPS", "SiteName": "user.auth.xboxlive.com", "RpsTicket": "d=" + msAccess},
+		"RelyingParty": "http://auth.xboxlive.com", "TokenType": "JWT",
+	}, map[string]string{"x-xbl-contract-version": "1"})
+	xblToken := xbl["Token"].(string)
+	uhs := xbl["DisplayClaims"].(map[string]any)["xui"].([]any)[0].(map[string]any)["uhs"].(string)
+
+	xsts := postJSON("https://xsts.auth.xboxlive.com/xsts/authorize", map[string]any{
+		"Properties": map[string]any{"SandboxId": "RETAIL", "UserTokens": []string{xblToken}},
+		"RelyingParty": "rp://api.minecraftservices.com/", "TokenType": "JWT",
+	}, map[string]string{"x-xbl-contract-version": "1"})
+	xstsToken := xsts["Token"].(string)
+
+	fmt.Println(">>> 마인크래프트 토큰 발급 중...")
+	mc := postJSON("https://api.minecraftservices.com/authentication/login_with_xbox", map[string]any{
+		"identityToken": fmt.Sprintf("XBL3.0 x=%s;%s", uhs, xstsToken),
+	}, nil)
+	mcAccess := mc["access_token"].(string)
+
+	req, _ := http.NewRequest("GET", "https://api.minecraftservices.com/minecraft/profile", nil)
+	req.Header.Set("Authorization", "Bearer "+mcAccess)
+	resp, err := http.DefaultClient.Do(req)
+	must(err)
+	defer resp.Body.Close()
+	var profile map[string]any
+	json.NewDecoder(resp.Body).Decode(&profile)
+	profileID, ok := profile["id"].(string)
+	if !ok {
+		must(fmt.Errorf("이 계정은 마인크래프트를 소유하지 않은 것 같습니다: %v", profile))
+	}
+	profileName := profile["name"].(string)
+	fmt.Println(">>> 연결됨:", profileName, "("+profileID+")")
+
+	now := time.Now().Unix()
+	expiresIn, _ := msToken["expires_in"].(float64)
+	mcExpires, _ := mc["expires_in"].(float64)
+	if mcExpires == 0 {
+		mcExpires = 86400
+	}
+	account := map[string]any{
+		"type": "MSA", "msa-client-id": msaClientID,
+		"msa": map[string]any{"iat": now, "exp": now + int64(expiresIn), "token": msAccess,
+			"refresh_token": msToken["refresh_token"], "extra": msToken},
+		"utoken": map[string]any{"iat": now, "token": xblToken, "extra": map[string]string{"uhs": uhs}},
+		"xrp-mc": map[string]any{"iat": now, "token": xstsToken, "extra": map[string]string{"uhs": uhs}},
+		"ygg":    map[string]any{"iat": now, "exp": now + int64(mcExpires), "token": mcAccess},
+		"profile":     map[string]any{"id": profileID, "name": profileName},
+		"entitlement": map[string]any{"ownsMinecraft": true, "canPlayMinecraft": true},
+		"active": true, "id": profileID,
+	}
+	data := map[string]any{"formatVersion": 3, "accounts": []any{account}}
+	b, _ := json.MarshalIndent(data, "", "  ")
+	must(os.WriteFile(accPath, b, 0644))
+	fmt.Println(">>> 계정 저장 완료:", profileName)
+	if cfg.Profile == "" {
+		cfg.Profile = profileName
+	}
+}
+
+// ---------------- 부트스트랩: ffmpeg ----------------
+
+func ensureFFmpeg() {
+	if _, err := os.Stat(cfg.FFmpegPath); err == nil {
+		return
+	}
+	fmt.Println(">>> ffmpeg 가 없어서 자동으로 설치합니다...")
+	zipPath := filepath.Join(os.TempDir(), "ffmpeg.zip")
+	must(downloadFile(ffmpegZipURL, zipPath))
+	installDir := filepath.Join(exeDir, "ffmpeg")
+	os.MkdirAll(installDir, 0755)
+	must(unzip(zipPath, installDir))
+	os.Remove(zipPath)
+	found := findFile(installDir, "ffmpeg.exe")
+	if found == "" {
+		must(fmt.Errorf("압축 해제 후 ffmpeg.exe 를 찾지 못했습니다"))
+	}
+	cfg.FFmpegPath = found
+	fmt.Println(">>> ffmpeg 설치 완료:", found)
+}
+
+// ---------------- 서버와의 통신 ----------------
+
+func apiURL(path string) string { return strings.TrimRight(cfg.ServerURL, "/") + path }
 
 func heartbeat() {
 	body, _ := json.Marshal(map[string]string{"token": cfg.Token})
@@ -100,6 +454,8 @@ func ack(id string, result map[string]any) {
 	}
 	resp.Body.Close()
 }
+
+// ---------------- 명령 처리 ----------------
 
 func psSendKey(key string) {
 	ps := fmt.Sprintf(`$w=New-Object -ComObject WScript.Shell; if($w.AppActivate('%s')){Start-Sleep -Milliseconds 300; $w.SendKeys('{%s}')}`, cfg.WindowTitle, key)
@@ -139,18 +495,14 @@ func handleRecordStart(name string) map[string]any {
 		"-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", tmp,
 	}
 	cmd := exec.Command(cfg.FFmpegPath, args...)
-	stdin, _ := cmd.StdinPipe()
-	cmd.Stdout = nil
-	cmd.Stderr = nil
+	cmd.Stdin, _ = os.Open(os.DevNull)
+	stdinPipe, _ := cmd.StdinPipe()
 	if err := cmd.Start(); err != nil {
 		return map[string]any{"ok": false, "error": err.Error()}
 	}
 	recordings[name] = cmd
 	recordFiles[name] = tmp
-	go func() {
-		// ffmpeg 가 'q' 입력을 받으면 정상 종료하므로, stdin 을 살려둔다.
-		_ = stdin
-	}()
+	_ = stdinPipe
 	return map[string]any{"ok": true}
 }
 
@@ -159,9 +511,7 @@ func handleRecordStop(name, workDir string) map[string]any {
 	if !ok {
 		return map[string]any{"ok": false, "error": "녹화 중이 아님: " + name}
 	}
-	if stdin, err := cmd.StdinPipe(); err == nil {
-		io.WriteString(stdin, "q")
-	}
+	cmd.Process.Signal(os.Interrupt)
 	done := make(chan error, 1)
 	go func() { done <- cmd.Wait() }()
 	select {
@@ -186,7 +536,6 @@ func uploadFile(path, name, workDir string) error {
 		return err
 	}
 	defer f.Close()
-
 	buf := &bytes.Buffer{}
 	w := multipart.NewWriter(buf)
 	w.WriteField("token", cfg.Token)
@@ -200,7 +549,6 @@ func uploadFile(path, name, workDir string) error {
 		return err
 	}
 	w.Close()
-
 	req, _ := http.NewRequest("POST", apiURL("/api/agent/upload"), buf)
 	req.Header.Set("Content-Type", w.FormDataContentType())
 	client := &http.Client{Timeout: 5 * time.Minute}
@@ -237,7 +585,14 @@ func handle(c Command) {
 
 func main() {
 	loadConfig()
-	fmt.Println("mcbuildai 에이전트 시작 ->", cfg.ServerURL)
+	fmt.Println("=== mcbuildai 촬영 에이전트 ===")
+	ensurePrism()
+	ensureInstance()
+	ensureAccount()
+	ensureFFmpeg()
+	fmt.Println()
+	fmt.Println(">>> 준비 완료! 서버에 연결합니다:", cfg.ServerURL)
+
 	lastHeartbeat := time.Now().Add(-time.Hour)
 	for {
 		if time.Since(lastHeartbeat) > 10*time.Second {

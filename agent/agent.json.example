@@ -1,10 +1,11 @@
 {
+  "_note": "이 파일은 필요 없습니다. exe 는 서버/토큰/인스턴스 설정이 이미 내장되어 있어서 agent.json 없이 그냥 실행하면 됩니다. 뭔가 다르게 쓰고 싶을 때만 exe 옆에 agent.json 을 만들어서 아래 값 중 바꿀 것만 적으세요.",
   "server_url": "https://yt.audest.me",
-  "token": "PUT_YOUR_AGENT_TOKEN_HERE",
-  "prism_path": "C:\\Program Files\\PrismLauncher\\prismlauncher.exe",
+  "token": "",
+  "prism_path": "",
   "instance": "BuildCam",
   "profile": "davvid3289",
   "join_server": "audestyt.gamehost.kr:1035",
-  "window_title": "Minecraft 1.21.1",
-  "ffmpeg_path": "ffmpeg.exe"
+  "window_title": "Minecraft* 1.21.1",
+  "ffmpeg_path": ""
 }
