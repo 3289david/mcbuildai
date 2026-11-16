@@ -60,6 +60,7 @@ const (
 )
 
 var defaultToken = "" // ldflags -X 로 빌드 시점에 주입, 소스에는 비워둠
+var buildID = "dev"   // ldflags -X 로 git 커밋 해시 주입 - 어떤 exe 가 실행 중인지 바로 확인용
 
 type Config struct {
 	ServerURL   string `json:"server_url"`
@@ -692,7 +693,7 @@ func ensureAutostart() {
 
 func main() {
 	loadConfig()
-	say("=== mcbuildai 촬영 에이전트 ===")
+	say("=== mcbuildai 촬영 에이전트 (빌드:", buildID, ") ===")
 	ensureAutostart()
 	account = ensureAccount()
 	ensureFFmpeg()
@@ -713,7 +714,7 @@ func main() {
 			wasOnline = ok
 		}
 		if wasOnline && time.Since(lastStatusPrint) > 60*time.Second {
-			say("... 정상 작동 중 (", time.Now().Format("15:04:05"), ")")
+			say("... 정상 작동 중 [빌드:"+buildID+"] (", time.Now().Format("15:04:05"), ")")
 			lastStatusPrint = time.Now()
 		}
 		if time.Since(lastLogPush) > 5*time.Second {
