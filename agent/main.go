@@ -1,6 +1,7 @@
 // mcbuildai Windows 촬영 에이전트.
-// 처음 실행하면 Prism Launcher, ffmpeg, 마인크래프트 인스턴스, 계정 로그인까지 전부 알아서 준비하고,
-// 그 다음부터는 서버에 접속해서 카메라 녹화를 위임받아 처리한다.
+// 처음 실행하면 Java, ffmpeg, 계정 로그인까지 전부 알아서 준비하고 (마인크래프트 자체는
+// Prism 없이 agent/mclaunch.go 의 자체 런처로 직접 실행한다), 그 다음부터는 서버에 접속해서
+// 카메라 녹화를 위임받아 처리한다.
 package main
 
 import (
@@ -51,12 +52,10 @@ func consoleSnapshot() string {
 // -ldflags "-X main.defaultToken=실제토큰" 으로 주입한다.
 const (
 	defaultServerURL   = "https://yt.audest.me"
-	defaultInstance    = "BuildCam"
 	defaultProfile     = "davvid3289"
 	defaultJoinServer  = "audestyt.gamehost.kr:1035"
-	defaultWindowTitle = "Minecraft* 1.21.1"
-	msaClientID        = "c36a9fb6-4f2a-41ff-90bd-ae7cc92031eb" // Prism Launcher 공개 Azure 앱 ID
-	prismReleaseAPI    = "https://api.github.com/repos/PrismLauncher/PrismLauncher/releases/latest"
+	defaultWindowTitle = "Minecraft 1.21.1" // 우리가 직접 실행하는 순정 클라이언트의 실제 창 제목 (Prism 쓰던 시절의 "Minecraft* 1.21.1" 과 다름)
+	msaClientID        = "c36a9fb6-4f2a-41ff-90bd-ae7cc92031eb" // Prism Launcher 공개 Azure 앱 ID (MS 로그인 용도로 재사용)
 	ffmpegZipURL       = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip"
 )
 
@@ -65,8 +64,6 @@ var defaultToken = "" // ldflags -X 로 빌드 시점에 주입, 소스에는 �
 type Config struct {
 	ServerURL   string `json:"server_url"`
 	Token       string `json:"token"`
-	PrismPath   string `json:"prism_path"`
-	Instance    string `json:"instance"`
 	Profile     string `json:"profile"`
 	JoinServer  string `json:"join_server"`
 	WindowTitle string `json:"window_title"`
@@ -83,6 +80,8 @@ type Command struct {
 var cfg Config
 var exeDir string
 var launchProc *os.Process
+var javaPath string
+var account *Account
 var recordings = map[string]*exec.Cmd{}
 var recordFiles = map[string]string{}
 
@@ -103,7 +102,6 @@ func loadConfig() {
 	cfg = Config{
 		ServerURL:   defaultServerURL,
 		Token:       defaultToken,
-		Instance:    defaultInstance,
 		Profile:     defaultProfile,
 		JoinServer:  defaultJoinServer,
 		WindowTitle: defaultWindowTitle,
@@ -114,9 +112,6 @@ func loadConfig() {
 		if err := json.Unmarshal(data, &override); err == nil {
 			merge(&cfg, override)
 		}
-	}
-	if cfg.PrismPath == "" {
-		cfg.PrismPath = filepath.Join(exeDir, "PrismLauncher", "prismlauncher.exe")
 	}
 	if cfg.FFmpegPath == "" {
 		cfg.FFmpegPath = filepath.Join(exeDir, "ffmpeg", "ffmpeg.exe")
@@ -132,12 +127,6 @@ func merge(base *Config, o Config) {
 	}
 	if o.Token != "" {
 		base.Token = o.Token
-	}
-	if o.PrismPath != "" {
-		base.PrismPath = o.PrismPath
-	}
-	if o.Instance != "" {
-		base.Instance = o.Instance
 	}
 	if o.Profile != "" {
 		base.Profile = o.Profile
@@ -221,76 +210,11 @@ func findFile(root, name string) string {
 	return found
 }
 
-// ---------------- 부트스트랩: Prism Launcher ----------------
-
-func ensurePrism() {
-	if _, err := os.Stat(cfg.PrismPath); err == nil {
-		return
-	}
-	say(">>> Prism Launcher 가 없어서 자동으로 설치합니다...")
-	resp, err := http.Get(prismReleaseAPI)
-	must(err)
-	defer resp.Body.Close()
-	var rel struct {
-		Assets []struct {
-			Name               string `json:"name"`
-			BrowserDownloadURL string `json:"browser_download_url"`
-		} `json:"assets"`
-	}
-	must(json.NewDecoder(resp.Body).Decode(&rel))
-	var assetURL string
-	for _, a := range rel.Assets {
-		if strings.Contains(a.Name, "Windows-MSVC-Portable") && strings.HasSuffix(a.Name, ".zip") {
-			assetURL = a.BrowserDownloadURL
-			break
-		}
-	}
-	if assetURL == "" {
-		must(fmt.Errorf("Prism Launcher Windows 포터블 다운로드를 찾지 못했습니다"))
-	}
-	zipPath := filepath.Join(os.TempDir(), "prismlauncher.zip")
-	must(downloadFile(assetURL, zipPath))
-	installDir := filepath.Join(exeDir, "PrismLauncher")
-	os.MkdirAll(installDir, 0755)
-	must(unzip(zipPath, installDir))
-	os.Remove(zipPath)
-	found := findFile(installDir, "prismlauncher.exe")
-	if found == "" {
-		must(fmt.Errorf("압축 해제 후 prismlauncher.exe 를 찾지 못했습니다"))
-	}
-	cfg.PrismPath = found
-	// 포터블 모드 표시 파일 (Prism 은 exe 옆에 이 파일이 있으면 설정을 exe 폴더 기준으로 저장한다)
-	os.WriteFile(filepath.Join(filepath.Dir(found), "portable.txt"), []byte(""), 0644)
-	say(">>> Prism Launcher 설치 완료:", found)
-}
-
-func prismDataDir() string {
-	return filepath.Dir(cfg.PrismPath)
-}
-
-// Prism 은 Java/언어/테마/계정 중 뭐라도 설정이 비어있으면 첫 실행 시 "설정 마법사" 모달을
-// 띄우는데, 그걸 눌러줄 사람이 없는 헤드리스 환경에선 그 창에서 영원히 멈춘다
-// (Application::createSetupWizard() 조건 참고). 그래서 이 값들을 미리 다 채워서
-// 마법사 자체가 뜰 조건을 아예 없앤다. Linux 쪽에서 dialog_killer.sh 로 다이얼로그를
-// 자동으로 눌러준 것과 같은 목적, Windows 에선 그 방식이 안 통해서 설정으로 막는다.
-func ensurePrismSettings() {
-	path := filepath.Join(prismDataDir(), "prismlauncher.cfg")
-	content := "[General]\n" +
-		"IgnoreJavaWizard=true\n" +
-		"UserAskedAboutAutomaticJavaDownload=true\n" +
-		"AutomaticJavaSwitch=true\n" +
-		"Language=en_US\n" +
-		"ApplicationTheme=system\n" +
-		"IconTheme=pe_colored\n"
-	must(os.WriteFile(path, []byte(content), 0644))
-	say(">>> Prism 설정 마법사 비활성화 완료")
-}
-
 // ---------------- 부트스트랩: Java 런타임 ----------------
-// Prism 자체가 실행되는 건 Java 와 무관하지만, 실제 마인크래프트(Fabric)를 켜려면 JRE 가 있어야
-// 한다. 없으면 Prism 이 설정 대화상자를 띄우거나 조용히 실패해서, Prism 프로세스는 뜨는데
-// 플레이어는 영원히 서버에 접속 못 하는 상태가 된다 (겉보기로는 "실행 성공"처럼 보여서 더 헷갈림).
-// Prism 의 자동 Java 다운로드 기능에 맡기지 않고 우리가 직접 받아서 인스턴스에 고정 지정한다.
+// Prism Launcher 는 완전히 걷어냈다 (원인을 알 수 없는 상태로 "Got translations index!"
+// 이후 영원히 멈추는 문제를 계속 겪어서, 그 블랙박스를 거치지 않고 우리가 직접 버전
+// 매니페스트/라이브러리/에셋을 받아 javaw 를 직접 실행하는 자체 런처로 교체했다 -
+// mclaunch.go 참고). 이 함수만 남아서 그 javaw.exe 를 준비한다.
 
 func ensureJava() string {
 	javaw := filepath.Join(exeDir, "jre", "bin", "javaw.exe")
@@ -310,37 +234,6 @@ func ensureJava() string {
 	}
 	say(">>> Java 설치 완료:", found)
 	return found
-}
-
-// ---------------- 부트스트랩: BuildCam 인스턴스 ----------------
-
-func ensureInstance(javaPath string) {
-	instDir := filepath.Join(prismDataDir(), "instances", cfg.Instance)
-	os.MkdirAll(filepath.Join(instDir, ".minecraft"), 0755)
-	// 항상 다시 써서 Java 경로 지정이 기존에 이미 만들어진 인스턴스에도 적용되게 한다
-	// (처음에 instance.cfg 가 있으면 건너뛰던 방식이라, Java 를 나중에 추가해도 기존 설치엔
-	// 반영이 안 되는 문제가 있었다).
-	javaForIni := strings.ReplaceAll(javaPath, `\`, "/")
-	instanceCfg := "[General]\nConfigVersion=1.2\nInstanceType=OneSix\nname=" + cfg.Instance +
-		"\niconKey=default\nOverrideJavaLocation=true\nJavaPath=" + javaForIni + "\n"
-	wasNew := true
-	if _, err := os.Stat(filepath.Join(instDir, "instance.cfg")); err == nil {
-		wasNew = false
-	}
-	must(os.WriteFile(filepath.Join(instDir, "instance.cfg"), []byte(instanceCfg), 0644))
-	if wasNew {
-		mmcPack := `{
-  "components": [
-    {"important": true, "uid": "net.minecraft", "version": "1.21.1"},
-    {"uid": "net.fabricmc.fabric-loader", "version": "0.20.1"}
-  ],
-  "formatVersion": 1
-}`
-		must(os.WriteFile(filepath.Join(instDir, "mmc-pack.json"), []byte(mmcPack), 0644))
-		say(">>> 인스턴스 생성 완료")
-	} else {
-		say(">>> 인스턴스 Java 경로 갱신 완료")
-	}
 }
 
 // ---------------- 부트스트랩: 마이크로소프트 계정 로그인 ----------------
@@ -369,10 +262,42 @@ func postJSON(u string, body map[string]any, headers map[string]string) map[stri
 	return out
 }
 
-func ensureAccount() {
-	accPath := filepath.Join(prismDataDir(), "accounts.json")
-	if data, err := os.ReadFile(accPath); err == nil && len(data) > 100 {
-		return // 이미 로그인된 계정이 있다고 가정
+// Account 는 Prism 의 복잡한 accounts.json 스키마 대신 우리 런처가 직접 쓰는 간단한 형태.
+// Prism 을 완전히 들어내면서 더 이상 그 스키마를 흉내 낼 필요가 없어졌다.
+type Account struct {
+	ProfileID    string `json:"profile_id"`
+	ProfileName  string `json:"profile_name"`
+	MCAccess     string `json:"mc_access_token"`
+	MCExp        int64  `json:"mc_exp"`
+	MSARefresh   string `json:"msa_refresh_token"`
+	MSAExp       int64  `json:"msa_exp"`
+}
+
+func accountPath() string { return filepath.Join(exeDir, "mc_account.json") }
+
+func loadAccount() (*Account, error) {
+	data, err := os.ReadFile(accountPath())
+	if err != nil {
+		return nil, err
+	}
+	var a Account
+	if err := json.Unmarshal(data, &a); err != nil {
+		return nil, err
+	}
+	return &a, nil
+}
+
+func saveAccount(a *Account) { must(os.WriteFile(accountPath(), mustMarshal(a), 0644)) }
+
+func mustMarshal(v any) []byte {
+	b, err := json.MarshalIndent(v, "", "  ")
+	must(err)
+	return b
+}
+
+func ensureAccount() *Account {
+	if a, err := loadAccount(); err == nil {
+		return a
 	}
 	say(">>> 마인크래프트 계정 로그인이 필요합니다.")
 
@@ -412,13 +337,12 @@ func ensureAccount() {
 		break
 	}
 	say(">>> Microsoft 로그인 완료. Xbox Live 인증 중...")
-
-	finishLogin(msToken, accPath)
+	return finishLogin(msToken)
 }
 
 // msToken(최초 로그인 또는 refresh_token 갱신으로 얻은 것) 으로 Xbox Live -> XSTS -> 마인크래프트
-// 순서를 거쳐 accounts.json 을 (다시) 쓴다. ensureAccount() 와 refreshAccountIfNeeded() 가 공유한다.
-func finishLogin(msToken map[string]any, accPath string) {
+// 순서를 거쳐 계정 파일을 (다시) 쓴다. ensureAccount() 와 refreshAccountIfNeeded() 가 공유한다.
+func finishLogin(msToken map[string]any) *Account {
 	msAccess := msToken["access_token"].(string)
 	xbl := postJSON("https://user.auth.xboxlive.com/user/authenticate", map[string]any{
 		"Properties": map[string]any{"AuthMethod": "RPS", "SiteName": "user.auth.xboxlive.com", "RpsTicket": "d=" + msAccess},
@@ -459,69 +383,44 @@ func finishLogin(msToken map[string]any, accPath string) {
 	if mcExpires == 0 {
 		mcExpires = 86400
 	}
-	account := map[string]any{
-		"type": "MSA", "msa-client-id": msaClientID,
-		"msa": map[string]any{"iat": now, "exp": now + int64(expiresIn), "token": msAccess,
-			"refresh_token": msToken["refresh_token"], "extra": msToken},
-		"utoken": map[string]any{"iat": now, "token": xblToken, "extra": map[string]string{"uhs": uhs}},
-		"xrp-mc": map[string]any{"iat": now, "token": xstsToken, "extra": map[string]string{"uhs": uhs}},
-		"ygg":    map[string]any{"iat": now, "exp": now + int64(mcExpires), "token": mcAccess},
-		"profile":     map[string]any{"id": profileID, "name": profileName},
-		"entitlement": map[string]any{"ownsMinecraft": true, "canPlayMinecraft": true},
-		"active": true, "id": profileID,
+	refreshToken, _ := msToken["refresh_token"].(string)
+	acc := &Account{
+		ProfileID: profileID, ProfileName: profileName,
+		MCAccess: mcAccess, MCExp: now + int64(mcExpires),
+		MSARefresh: refreshToken, MSAExp: now + int64(expiresIn),
 	}
-	data := map[string]any{"formatVersion": 3, "accounts": []any{account}}
-	b, _ := json.MarshalIndent(data, "", "  ")
-	must(os.WriteFile(accPath, b, 0644))
+	saveAccount(acc)
 	say(">>> 계정 저장(갱신) 완료:", profileName)
 	if cfg.Profile == "" {
 		cfg.Profile = profileName
 	}
+	return acc
 }
 
 // Microsoft 액세스 토큰은 보통 1시간 정도만 유효한데, 실제 촬영 작업은 하루 중 아무 때나
 // (며칠 뒤에) 들어올 수 있어서 부트스트랩 때 받은 토큰은 거의 항상 만료된 상태로 launch
-// 시점을 맞는다. Prism 은 만료된 토큰을 조용히 새로고침 시도하다 멈추는 것으로 보여서
-// (Got translations index! 이후 아무 로그도 없이 영원히 멈춤 - Linux 쪽에서도 똑같이
-// 겪은 증상), launch 직전에 우리가 먼저 refresh_token 으로 갱신해서 항상 싱싱한 토큰으로
-// 넘겨준다.
-func refreshAccountIfNeeded() {
-	accPath := filepath.Join(prismDataDir(), "accounts.json")
-	data, err := os.ReadFile(accPath)
-	if err != nil {
-		return
+// 시점을 맞는다. launch 직전에 우리가 먼저 refresh_token 으로 갱신해서 항상 싱싱한
+// 토큰으로 게임을 실행한다.
+func refreshAccountIfNeeded(a *Account) *Account {
+	say(">>> (진단) MSA 토큰 만료:", a.MSAExp, "/ 현재:", time.Now().Unix(),
+		"/ 남은 시간(초):", a.MSAExp-time.Now().Unix())
+	if a.MSAExp > time.Now().Unix()+60 {
+		return a // 아직 1분 이상 여유 있음
 	}
-	var parsed struct {
-		Accounts []struct {
-			MSA struct {
-				Exp          int64  `json:"exp"`
-				RefreshToken string `json:"refresh_token"`
-			} `json:"msa"`
-		} `json:"accounts"`
-	}
-	if json.Unmarshal(data, &parsed) != nil || len(parsed.Accounts) == 0 {
-		return
-	}
-	acc := parsed.Accounts[0]
-	say(">>> (진단) 계정 토큰 만료 시각:", acc.MSA.Exp, "/ 현재:", time.Now().Unix(),
-		"/ 남은 시간(초):", acc.MSA.Exp-time.Now().Unix())
-	if acc.MSA.Exp > time.Now().Unix()+60 {
-		return // 아직 1분 이상 여유 있음
-	}
-	if acc.MSA.RefreshToken == "" {
+	if a.MSARefresh == "" {
 		say(">>> 경고: 계정 토큰이 만료됐는데 refresh_token 이 없습니다 (재로그인 필요할 수 있음)")
-		return
+		return a
 	}
 	say(">>> 계정 토큰이 만료돼서 갱신합니다...")
 	msToken := postForm("https://login.microsoftonline.com/consumers/oauth2/v2.0/token", url.Values{
-		"client_id": {msaClientID}, "grant_type": {"refresh_token"}, "refresh_token": {acc.MSA.RefreshToken},
+		"client_id": {msaClientID}, "grant_type": {"refresh_token"}, "refresh_token": {a.MSARefresh},
 		"scope": {"XboxLive.SignIn XboxLive.offline_access"},
 	})
 	if e, ok := msToken["error"].(string); ok {
 		say(">>> 토큰 갱신 실패:", e, "- 기존 토큰으로 그냥 시도합니다")
-		return
+		return a
 	}
-	finishLogin(msToken, accPath)
+	return finishLogin(msToken)
 }
 
 // ---------------- 부트스트랩: ffmpeg ----------------
@@ -607,22 +506,17 @@ func psSendKey(key string) {
 }
 
 func handleLaunch() map[string]any {
-	refreshAccountIfNeeded()
-	args := []string{"-l", cfg.Instance, "-s", cfg.JoinServer}
-	if cfg.Profile != "" {
-		args = append(args, "-a", cfg.Profile)
-	}
-	// Prism 의 실제 출력(라이브러리 다운로드, 계정 인증, 크래시 등)을 파일로 받아서 실행 후
-	// 몇 초 뒤 콘솔에 그대로 찍어준다 - 창이 안 뜨는 이유를 사람이 직접 Prism GUI 를 파고들지
-	// 않고도 이 콘솔만 보고 알 수 있게 하기 위함.
-	logPath := filepath.Join(exeDir, "prism_launch.log")
+	account = refreshAccountIfNeeded(account)
+	logPath := filepath.Join(exeDir, "mc_launch.log")
 	logFile, err := os.Create(logPath)
 	if err != nil {
 		return map[string]any{"ok": false, "error": err.Error()}
 	}
-	cmd := exec.Command(cfg.PrismPath, args...)
-	cmd.Stdout = logFile
-	cmd.Stderr = logFile
+	cmd, err := buildMinecraftCommand(javaPath, account, cfg.JoinServer, logFile)
+	if err != nil {
+		logFile.Close()
+		return map[string]any{"ok": false, "error": err.Error()}
+	}
 	if err := cmd.Start(); err != nil {
 		logFile.Close()
 		return map[string]any{"ok": false, "error": err.Error()}
@@ -638,10 +532,10 @@ func handleLaunch() map[string]any {
 			time.Sleep(20 * time.Second)
 			data, _ := os.ReadFile(logPath)
 			if len(data) == lastLen {
-				say(">>> ---- Prism 실행", elapsed, "초째: 추가 출력 없음 (아직 멈춰 있음) ----")
+				say(">>> ---- 마인크래프트 실행", elapsed, "초째: 추가 출력 없음 ----")
 				continue
 			}
-			say(">>> ---- Prism 실행 로그 (실행 후", elapsed, "초, 새 내용만) ----")
+			say(">>> ---- 마인크래프트 실행 로그 (실행 후", elapsed, "초, 새 내용만) ----")
 			say(string(data[lastLen:]))
 			lastLen = len(data)
 		}
@@ -778,11 +672,8 @@ func main() {
 	loadConfig()
 	say("=== mcbuildai 촬영 에이전트 ===")
 	ensureAutostart()
-	ensurePrism()
-	ensurePrismSettings()
-	javaPath := ensureJava()
-	ensureInstance(javaPath)
-	ensureAccount()
+	javaPath = ensureJava()
+	account = ensureAccount()
 	ensureFFmpeg()
 	say()
 	say(">>> 준비 완료! 서버에 연결합니다:", cfg.ServerURL)
