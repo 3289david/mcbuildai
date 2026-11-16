@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -402,7 +403,29 @@ func formatUUID(id string) string {
 	return id[0:8] + "-" + id[8:12] + "-" + id[12:16] + "-" + id[16:20] + "-" + id[20:32]
 }
 
-func buildMinecraftCommand(javaExe string, acc *Account, joinServer string, logFile *os.File) (*exec.Cmd, error) {
+// 일부 Minecraft 서버 주소(예: audestyt.gamehost.kr)는 그 자체로는 A 레코드가 없고
+// _minecraft._tcp.<host> SRV 레코드로만 실제 주소(host.gamehost.kr:1035)를 알려준다.
+// 보통 멀티플레이 서버 목록에서 접속할 땐 클라이언트가 이 SRV 조회를 자동으로 해주는데,
+// --quickPlayMultiplayer 는 이 조회를 안 하고 주소를 그대로 DNS 에 물어봐서 "Unknown
+// Host" 로 실패했다. 그래서 launch 전에 우리가 먼저 SRV 를 조회해서 실제 접속 주소로
+// 바꿔준다.
+func resolveJoinTarget(hostport string) string {
+	host, port, ok := strings.Cut(hostport, ":")
+	if !ok {
+		host = hostport
+	}
+	_, srvs, err := net.LookupSRV("minecraft", "tcp", host)
+	if err != nil || len(srvs) == 0 {
+		return hostport // SRV 없음 - 원래 주소 그대로 (보통 서버는 이쪽이 맞다)
+	}
+	target := strings.TrimSuffix(srvs[0].Target, ".")
+	say(">>> SRV 레코드 발견:", host, "->", target+":"+strconv.Itoa(int(srvs[0].Port)))
+	_ = port
+	return target + ":" + strconv.Itoa(int(srvs[0].Port))
+}
+
+func buildMinecraftCommand(javaExe string, acc *Account, joinServerRaw string, logFile *os.File) (*exec.Cmd, error) {
+	joinServer := resolveJoinTarget(joinServerRaw)
 	say(">>> 버전/Fabric 정보 확인 중...")
 	vd, err := resolveVersionDetail()
 	if err != nil {
