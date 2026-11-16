@@ -512,6 +512,16 @@ func handleLaunch() map[string]any {
 	// 그래서 명령을 "받았다"는 것만 바로 ack 하고, 실제 준비+실행은 백그라운드에서 한다.
 	go func() {
 		defer func() { launchMu.Lock(); launchInFlight = false; launchMu.Unlock() }()
+		// 이전 실행이 아직 떠 있으면(멈춰 있는 경우 포함) 먼저 확실히 끝내고 OS 가 파일
+		// 핸들을 놓을 시간을 준다 - 안 그러면 Java 재설치/덮어쓰기 중에 "다른 프로세스가
+		// 사용 중"이라고 실패한다 (jre25 폴더의 DLL 을 이전 javaw.exe 가 물고 있던 경우를
+		// 실제로 겪었다). buildMinecraftCommand() 전에, 즉 파일을 건드리기 전에 끝낸다.
+		if launchProc != nil {
+			launchProc.Kill()
+			launchProc.Wait()
+			launchProc = nil
+			time.Sleep(1 * time.Second)
+		}
 		account = refreshAccountIfNeeded(account)
 		logPath := filepath.Join(exeDir, "mc_launch.log")
 		logFile, err := os.Create(logPath)
@@ -524,9 +534,6 @@ func handleLaunch() map[string]any {
 			say(">>> 실행 준비 실패:", err)
 			logFile.Close()
 			return
-		}
-		if launchProc != nil { // 혹시 모를 이전 실행 잔재 정리 (중복 실행 방지용 안전장치)
-			launchProc.Kill()
 		}
 		if err := cmd.Start(); err != nil {
 			say(">>> 실행 시작 실패:", err)
