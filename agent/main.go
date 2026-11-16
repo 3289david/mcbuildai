@@ -537,6 +537,9 @@ func handleLaunch() map[string]any {
 			logFile.Close()
 			return
 		}
+		if launchProc != nil { // 혹시 모를 이전 실행 잔재 정리 (중복 실행 방지용 안전장치)
+			launchProc.Kill()
+		}
 		if err := cmd.Start(); err != nil {
 			say(">>> 실행 시작 실패:", err)
 			logFile.Close()
@@ -547,17 +550,29 @@ func handleLaunch() map[string]any {
 			cmd.Wait() // 좀비 프로세스 방지용 (출력은 이미 파일로 가고 있어서 결과는 안 봄)
 			logFile.Close()
 		}()
+		// 접속 시도(Connecting to...) 이후 실제로 입장하는지 실패하는지는 몇 분 걸릴 수도 있어서
+		// 90초만 보고 끊으면 정작 중요한 실패 사유(디스커넥트 메시지 등)를 놓친다. 최대 10분까지
+		// 계속 보되, 조용할 때는 1분에 한 번만 찍어서 너무 시끄럽지 않게 한다.
 		var lastLen int
-		for elapsed := 10; elapsed <= 90; elapsed += 20 {
-			time.Sleep(20 * time.Second)
+		quiet := 0
+		for elapsed := 15; elapsed <= 600; elapsed += 15 {
+			time.Sleep(15 * time.Second)
 			data, _ := os.ReadFile(logPath)
 			if len(data) == lastLen {
-				say(">>> ---- 마인크래프트 실행", elapsed, "초째: 추가 출력 없음 ----")
-				continue
+				quiet++
+				if quiet%4 == 0 {
+					say(">>> ---- 마인크래프트 실행", elapsed, "초째: 추가 출력 없음 ----")
+				}
+			} else {
+				say(">>> ---- 마인크래프트 실행 로그 (실행 후", elapsed, "초, 새 내용만) ----")
+				say(string(data[lastLen:]))
+				lastLen = len(data)
+				quiet = 0
 			}
-			say(">>> ---- 마인크래프트 실행 로그 (실행 후", elapsed, "초, 새 내용만) ----")
-			say(string(data[lastLen:]))
-			lastLen = len(data)
+			if cmd.ProcessState != nil {
+				say(">>> ---- 마인크래프트 프로세스 종료됨 (코드:", cmd.ProcessState.ExitCode(), ") ----")
+				break
+			}
 		}
 		say(">>> ---- 로그 끝 (이 창에 뜬 내용을 그대로 복사해서 보내주세요) ----")
 	}()
