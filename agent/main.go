@@ -80,7 +80,6 @@ type Command struct {
 var cfg Config
 var exeDir string
 var launchProc *os.Process
-var javaPath string
 var account *Account
 var currentWindowTitle string // mclaunch.go 가 실제 해석한 버전으로 채움 ("Minecraft 26.3" 등)
 
@@ -219,31 +218,10 @@ func findFile(root, name string) string {
 	return found
 }
 
-// ---------------- 부트스트랩: Java 런타임 ----------------
-// Prism Launcher 는 완전히 걷어냈다 (원인을 알 수 없는 상태로 "Got translations index!"
-// 이후 영원히 멈추는 문제를 계속 겪어서, 그 블랙박스를 거치지 않고 우리가 직접 버전
-// 매니페스트/라이브러리/에셋을 받아 javaw 를 직접 실행하는 자체 런처로 교체했다 -
-// mclaunch.go 참고). 이 함수만 남아서 그 javaw.exe 를 준비한다.
-
-func ensureJava() string {
-	javaw := filepath.Join(exeDir, "jre", "bin", "javaw.exe")
-	if _, err := os.Stat(javaw); err == nil {
-		return javaw
-	}
-	say(">>> Java 런타임이 없어서 자동으로 설치합니다...")
-	zipPath := filepath.Join(os.TempDir(), "jre.zip")
-	must(downloadFile("https://api.adoptium.net/v3/binary/latest/21/ga/windows/x64/jre/hotspot/normal/eclipse", zipPath))
-	jreDir := filepath.Join(exeDir, "jre")
-	os.MkdirAll(jreDir, 0755)
-	must(unzip(zipPath, jreDir))
-	os.Remove(zipPath)
-	found := findFile(jreDir, "javaw.exe")
-	if found == "" {
-		must(fmt.Errorf("압축 해제 후 javaw.exe 를 찾지 못했습니다"))
-	}
-	say(">>> Java 설치 완료:", found)
-	return found
-}
+// Java 런타임 설치는 mclaunch.go 의 ensureJavaVersion() 이 담당한다 (Minecraft 버전마다
+// 필요한 Java 메이저 버전이 다를 수 있어서, 버전 정보를 안 뒤에 그때 맞는 걸 받는다 -
+// Prism Launcher 는 완전히 걷어냈다: "Got translations index!" 이후 영원히 멈추는
+// 블랙박스 문제 때문에 버전 매니페스트/라이브러리/에셋을 직접 받는 자체 런처로 교체함).
 
 // ---------------- 부트스트랩: 마이크로소프트 계정 로그인 ----------------
 
@@ -540,7 +518,7 @@ func handleLaunch() map[string]any {
 			say(">>> 실행 준비 실패:", err)
 			return
 		}
-		cmd, err := buildMinecraftCommand(javaPath, account, cfg.JoinServer, logFile)
+		cmd, err := buildMinecraftCommand(account, cfg.JoinServer, logFile)
 		if err != nil {
 			say(">>> 실행 준비 실패:", err)
 			logFile.Close()
@@ -716,7 +694,6 @@ func main() {
 	loadConfig()
 	say("=== mcbuildai 촬영 에이전트 ===")
 	ensureAutostart()
-	javaPath = ensureJava()
 	account = ensureAccount()
 	ensureFFmpeg()
 	say()

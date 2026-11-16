@@ -58,6 +58,33 @@ func fabricProfileURL(mcVersion string) string {
 
 func mcDir() string { return filepath.Join(exeDir, "minecraft") }
 
+// 필요한 Java 메이저 버전을 (버전마다 다를 수 있으니) 그때그때 받는다. 메이저 버전별로
+// 폴더를 따로 둬서 여러 버전이 캐시로 같이 남아도 안 꼬인다.
+func ensureJavaVersion(majorVersion int) (string, error) {
+	jreDir := filepath.Join(exeDir, fmt.Sprintf("jre%d", majorVersion))
+	javaw := filepath.Join(jreDir, "bin", "javaw.exe")
+	if _, err := os.Stat(javaw); err == nil {
+		return javaw, nil
+	}
+	say(">>> Java", majorVersion, "런타임이 없어서 자동으로 설치합니다...")
+	zipPath := filepath.Join(os.TempDir(), fmt.Sprintf("jre%d.zip", majorVersion))
+	url := fmt.Sprintf("https://api.adoptium.net/v3/binary/latest/%d/ga/windows/x64/jre/hotspot/normal/eclipse", majorVersion)
+	if err := downloadFile(url, zipPath); err != nil {
+		return "", err
+	}
+	os.MkdirAll(jreDir, 0755)
+	if err := unzip(zipPath, jreDir); err != nil {
+		return "", err
+	}
+	os.Remove(zipPath)
+	found := findFile(jreDir, "javaw.exe")
+	if found == "" {
+		return "", fmt.Errorf("압축 해제 후 javaw.exe 를 찾지 못했습니다")
+	}
+	say(">>> Java", majorVersion, "설치 완료:", found)
+	return found, nil
+}
+
 // ---------------- 모장/Fabric 메타 JSON 모델 ----------------
 
 type mcRule struct {
@@ -122,7 +149,10 @@ type versionDetail struct {
 			URL string `json:"url"`
 		} `json:"client"`
 	} `json:"downloads"`
-	Libraries []mcLibrary `json:"libraries"`
+	Libraries   []mcLibrary `json:"libraries"`
+	JavaVersion struct {
+		MajorVersion int `json:"majorVersion"`
+	} `json:"javaVersion"`
 	Arguments struct {
 		Game json.RawMessage `json:"game"`
 		JVM  json.RawMessage `json:"jvm"`
@@ -447,7 +477,7 @@ func resolveJoinTarget(hostport string) string {
 	return target + ":" + strconv.Itoa(int(srvs[0].Port))
 }
 
-func buildMinecraftCommand(javaExe string, acc *Account, joinServerRaw string, logFile *os.File) (*exec.Cmd, error) {
+func buildMinecraftCommand(acc *Account, joinServerRaw string, logFile *os.File) (*exec.Cmd, error) {
 	joinServer := resolveJoinTarget(joinServerRaw)
 	say(">>> 버전/Fabric 정보 확인 중...")
 	mcVersion, err := resolveLatestReleaseVersion()
@@ -463,6 +493,18 @@ func buildMinecraftCommand(javaExe string, acc *Account, joinServerRaw string, l
 	fp, err := resolveFabricProfile(mcVersion)
 	if err != nil {
 		return nil, err
+	}
+
+	// Java 버전도 하드코딩하면 안 된다 - 26.3 은 class file version 69(Java 25)가
+	// 필요한데 예전엔 21 만 받아놔서 "UnsupportedClassVersionError" 로 바로 죽었다.
+	// 버전 JSON 의 javaVersion.majorVersion 을 그대로 써서 항상 맞는 JRE 를 받는다.
+	majorJava := vd.JavaVersion.MajorVersion
+	if majorJava == 0 {
+		majorJava = 21
+	}
+	javaExe, err := ensureJavaVersion(majorJava)
+	if err != nil {
+		return nil, fmt.Errorf("Java %d 설치 실패: %w", majorJava, err)
 	}
 
 	features := map[string]bool{"is_quick_play_multiplayer": joinServer != ""}

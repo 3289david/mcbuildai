@@ -87,7 +87,7 @@ func TestResolveAndBuildCommand(t *testing.T) {
 	acc := &Account{ProfileID: "bae1154433f2424bac6c1a795c45f2af", ProfileName: "davvid3289", MCAccess: "dummy-token"}
 	logFile, _ := os.CreateTemp(tmp, "log")
 	defer logFile.Close()
-	cmd, err := buildMinecraftCommand("/usr/bin/true", acc, "audestyt.gamehost.kr:1035", logFile)
+	cmd, err := buildMinecraftCommand(acc, "audestyt.gamehost.kr:1035", logFile)
 	if err != nil {
 		t.Fatalf("buildMinecraftCommand: %v", err)
 	}
@@ -107,6 +107,12 @@ func TestResolveAndBuildCommand(t *testing.T) {
 	if strings.Contains(joined, "audestyt.gamehost.kr:1035") {
 		t.Fatalf("unresolved raw hostname leaked into args instead of SRV target: %s", joined)
 	}
+	// 26.3 은 Java 25(class file version 69)가 필요한데, 예전엔 21 을 하드코딩해서
+	// UnsupportedClassVersionError 로 바로 죽었다. 실제로 더 높은 버전을 받았는지 확인.
+	if !strings.Contains(cmd.Path, "jre25") {
+		t.Fatalf("expected a jre25 javaw.exe for a Java-25-requiring version, got: %s", cmd.Path)
+	}
+	t.Logf("resolved java: %s", cmd.Path)
 	if strings.Contains(joined, "${") {
 		t.Fatalf("unsubstituted template variable left in args: %s", joined)
 	}
