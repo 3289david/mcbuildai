@@ -24,12 +24,35 @@ import (
 )
 
 const (
-	mcVersion          = "1.21.1"
 	fabricLoaderVer    = "0.20.1"
 	versionManifestURL = "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json"
 )
 
-func fabricProfileURL() string {
+// mcVersion 을 예전엔 고정 상수("1.21.1")로 박아뒀었는데, 실제 서버가 그새 훨씬 최신
+// 버전(26.3)으로 올라가 있어서 프로토콜이 안 맞아 "Connection reset" 으로 계속 막혔다.
+// 더 이상 특정 버전을 하드코딩하지 않고, 모장 매니페스트의 latest.release 를 그대로
+// 써서 항상 현재 최신 정식 버전으로 받는다 - 다음 버전이 나와도 다시 안 막힌다.
+func resolveLatestReleaseVersion() (string, error) {
+	var manifest struct {
+		Latest struct {
+			Release string `json:"release"`
+		} `json:"latest"`
+	}
+	resp, err := http.Get(versionManifestURL)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if err := json.NewDecoder(resp.Body).Decode(&manifest); err != nil {
+		return "", err
+	}
+	if manifest.Latest.Release == "" {
+		return "", fmt.Errorf("매니페스트에서 최신 버전을 찾지 못했습니다")
+	}
+	return manifest.Latest.Release, nil
+}
+
+func fabricProfileURL(mcVersion string) string {
 	return fmt.Sprintf("https://meta.fabricmc.net/v2/versions/loader/%s/%s/profile/json", mcVersion, fabricLoaderVer)
 }
 
@@ -99,7 +122,7 @@ type versionDetail struct {
 			URL string `json:"url"`
 		} `json:"client"`
 	} `json:"downloads"`
-	Libraries []mcLibrary     `json:"libraries"`
+	Libraries []mcLibrary `json:"libraries"`
 	Arguments struct {
 		Game json.RawMessage `json:"game"`
 		JVM  json.RawMessage `json:"jvm"`
@@ -181,7 +204,7 @@ func fetchCachedJSON(url, cachePath string, out any) error {
 	return nil
 }
 
-func resolveVersionDetail() (*versionDetail, error) {
+func resolveVersionDetail(mcVersion string) (*versionDetail, error) {
 	cacheDir := filepath.Join(mcDir(), "meta")
 	var manifest struct {
 		Versions []struct {
@@ -209,10 +232,10 @@ func resolveVersionDetail() (*versionDetail, error) {
 	return &vd, nil
 }
 
-func resolveFabricProfile() (*fabricProfile, error) {
+func resolveFabricProfile(mcVersion string) (*fabricProfile, error) {
 	cacheDir := filepath.Join(mcDir(), "meta")
 	var fp fabricProfile
-	if err := fetchCachedJSON(fabricProfileURL(), filepath.Join(cacheDir, "fabric-"+fabricLoaderVer+".json"), &fp); err != nil {
+	if err := fetchCachedJSON(fabricProfileURL(mcVersion), filepath.Join(cacheDir, "fabric-"+mcVersion+"-"+fabricLoaderVer+".json"), &fp); err != nil {
 		return nil, fmt.Errorf("Fabric 프로필: %w", err)
 	}
 	return &fp, nil
@@ -341,7 +364,7 @@ func extractNatives(jarPaths []string, destDir string) error {
 	return nil
 }
 
-func ensureClientJar(vd *versionDetail) (string, error) {
+func ensureClientJar(vd *versionDetail, mcVersion string) (string, error) {
 	dest := filepath.Join(mcDir(), "versions", mcVersion, mcVersion+".jar")
 	if err := downloadToFile(vd.Downloads.Client.URL, dest); err != nil {
 		return "", fmt.Errorf("클라이언트 jar: %w", err)
@@ -427,11 +450,17 @@ func resolveJoinTarget(hostport string) string {
 func buildMinecraftCommand(javaExe string, acc *Account, joinServerRaw string, logFile *os.File) (*exec.Cmd, error) {
 	joinServer := resolveJoinTarget(joinServerRaw)
 	say(">>> 버전/Fabric 정보 확인 중...")
-	vd, err := resolveVersionDetail()
+	mcVersion, err := resolveLatestReleaseVersion()
+	if err != nil {
+		return nil, fmt.Errorf("최신 버전 확인 실패: %w", err)
+	}
+	say(">>> 현재 최신 정식 버전:", mcVersion)
+	currentWindowTitle = "Minecraft " + mcVersion // ffmpeg/hide_hud 가 창을 찾을 때 쓸 실제 제목
+	vd, err := resolveVersionDetail(mcVersion)
 	if err != nil {
 		return nil, err
 	}
-	fp, err := resolveFabricProfile()
+	fp, err := resolveFabricProfile(mcVersion)
 	if err != nil {
 		return nil, err
 	}
@@ -443,7 +472,7 @@ func buildMinecraftCommand(javaExe string, acc *Account, joinServerRaw string, l
 	if err != nil {
 		return nil, err
 	}
-	clientJar, err := ensureClientJar(vd)
+	clientJar, err := ensureClientJar(vd, mcVersion)
 	if err != nil {
 		return nil, err
 	}
@@ -463,21 +492,21 @@ func buildMinecraftCommand(javaExe string, acc *Account, joinServerRaw string, l
 	os.MkdirAll(gameDir, 0755)
 
 	vars := map[string]string{
-		"natives_directory": nativesDir,
-		"launcher_name":      "mcbuildai",
-		"launcher_version":   "1.0",
-		"classpath":          strings.Join(classpath, ";"),
-		"auth_player_name":   acc.ProfileName,
-		"version_name":       mcVersion,
-		"game_directory":     gameDir,
-		"assets_root":        filepath.Join(mcDir(), "assets"),
-		"assets_index_name":  vd.AssetIndex.ID,
-		"auth_uuid":          formatUUID(acc.ProfileID),
-		"auth_access_token":  acc.MCAccess,
-		"clientid":           "-",
-		"auth_xuid":          "-",
-		"user_type":          "msa",
-		"version_type":       "release",
+		"natives_directory":    nativesDir,
+		"launcher_name":        "mcbuildai",
+		"launcher_version":     "1.0",
+		"classpath":            strings.Join(classpath, ";"),
+		"auth_player_name":     acc.ProfileName,
+		"version_name":         mcVersion,
+		"game_directory":       gameDir,
+		"assets_root":          filepath.Join(mcDir(), "assets"),
+		"assets_index_name":    vd.AssetIndex.ID,
+		"auth_uuid":            formatUUID(acc.ProfileID),
+		"auth_access_token":    acc.MCAccess,
+		"clientid":             "-",
+		"auth_xuid":            "-",
+		"user_type":            "msa",
+		"version_type":         "release",
 		"quickPlayMultiplayer": joinServer,
 	}
 	substitute := func(args []string) []string {

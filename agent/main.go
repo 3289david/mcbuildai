@@ -54,7 +54,7 @@ const (
 	defaultServerURL   = "https://yt.audest.me"
 	defaultProfile     = "davvid3289"
 	defaultJoinServer  = "audestyt.gamehost.kr:1035"
-	defaultWindowTitle = "Minecraft 1.21.1" // 우리가 직접 실행하는 순정 클라이언트의 실제 창 제목 (Prism 쓰던 시절의 "Minecraft* 1.21.1" 과 다름)
+	defaultWindowTitle = "Minecraft 1.21.1"                     // 우리가 직접 실행하는 순정 클라이언트의 실제 창 제목 (Prism 쓰던 시절의 "Minecraft* 1.21.1" 과 다름)
 	msaClientID        = "c36a9fb6-4f2a-41ff-90bd-ae7cc92031eb" // Prism Launcher 공개 Azure 앱 ID (MS 로그인 용도로 재사용)
 	ffmpegZipURL       = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip"
 )
@@ -82,6 +82,15 @@ var exeDir string
 var launchProc *os.Process
 var javaPath string
 var account *Account
+var currentWindowTitle string // mclaunch.go 가 실제 해석한 버전으로 채움 ("Minecraft 26.3" 등)
+
+func windowTitle() string {
+	if currentWindowTitle != "" {
+		return currentWindowTitle
+	}
+	return cfg.WindowTitle
+}
+
 var recordings = map[string]*exec.Cmd{}
 var recordFiles = map[string]string{}
 
@@ -265,12 +274,12 @@ func postJSON(u string, body map[string]any, headers map[string]string) map[stri
 // Account 는 Prism 의 복잡한 accounts.json 스키마 대신 우리 런처가 직접 쓰는 간단한 형태.
 // Prism 을 완전히 들어내면서 더 이상 그 스키마를 흉내 낼 필요가 없어졌다.
 type Account struct {
-	ProfileID    string `json:"profile_id"`
-	ProfileName  string `json:"profile_name"`
-	MCAccess     string `json:"mc_access_token"`
-	MCExp        int64  `json:"mc_exp"`
-	MSARefresh   string `json:"msa_refresh_token"`
-	MSAExp       int64  `json:"msa_exp"`
+	ProfileID   string `json:"profile_id"`
+	ProfileName string `json:"profile_name"`
+	MCAccess    string `json:"mc_access_token"`
+	MCExp       int64  `json:"mc_exp"`
+	MSARefresh  string `json:"msa_refresh_token"`
+	MSAExp      int64  `json:"msa_exp"`
 }
 
 func accountPath() string { return filepath.Join(exeDir, "mc_account.json") }
@@ -345,14 +354,14 @@ func ensureAccount() *Account {
 func finishLogin(msToken map[string]any) *Account {
 	msAccess := msToken["access_token"].(string)
 	xbl := postJSON("https://user.auth.xboxlive.com/user/authenticate", map[string]any{
-		"Properties": map[string]any{"AuthMethod": "RPS", "SiteName": "user.auth.xboxlive.com", "RpsTicket": "d=" + msAccess},
+		"Properties":   map[string]any{"AuthMethod": "RPS", "SiteName": "user.auth.xboxlive.com", "RpsTicket": "d=" + msAccess},
 		"RelyingParty": "http://auth.xboxlive.com", "TokenType": "JWT",
 	}, map[string]string{"x-xbl-contract-version": "1"})
 	xblToken := xbl["Token"].(string)
 	uhs := xbl["DisplayClaims"].(map[string]any)["xui"].([]any)[0].(map[string]any)["uhs"].(string)
 
 	xsts := postJSON("https://xsts.auth.xboxlive.com/xsts/authorize", map[string]any{
-		"Properties": map[string]any{"SandboxId": "RETAIL", "UserTokens": []string{xblToken}},
+		"Properties":   map[string]any{"SandboxId": "RETAIL", "UserTokens": []string{xblToken}},
 		"RelyingParty": "rp://api.minecraftservices.com/", "TokenType": "JWT",
 	}, map[string]string{"x-xbl-contract-version": "1"})
 	xstsToken := xsts["Token"].(string)
@@ -501,7 +510,7 @@ func ack(id string, result map[string]any) {
 // ---------------- 명령 처리 ----------------
 
 func psSendKey(key string) {
-	ps := fmt.Sprintf(`$w=New-Object -ComObject WScript.Shell; if($w.AppActivate('%s')){Start-Sleep -Milliseconds 300; $w.SendKeys('{%s}')}`, cfg.WindowTitle, key)
+	ps := fmt.Sprintf(`$w=New-Object -ComObject WScript.Shell; if($w.AppActivate('%s')){Start-Sleep -Milliseconds 300; $w.SendKeys('{%s}')}`, windowTitle(), key)
 	exec.Command("powershell", "-NoProfile", "-Command", ps).Run()
 }
 
@@ -595,7 +604,7 @@ func handleRecordStart(name string) map[string]any {
 	tmp := filepath.Join(os.TempDir(), "mcbuildai_"+name+".mp4")
 	os.Remove(tmp)
 	args := []string{
-		"-y", "-f", "gdigrab", "-framerate", "30", "-i", "title=" + cfg.WindowTitle,
+		"-y", "-f", "gdigrab", "-framerate", "30", "-i", "title=" + windowTitle(),
 		"-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", tmp,
 	}
 	cmd := exec.Command(cfg.FFmpegPath, args...)

@@ -10,7 +10,16 @@ func TestResolveAndBuildCommand(t *testing.T) {
 	tmp := t.TempDir()
 	exeDir = tmp
 
-	vd, err := resolveVersionDetail()
+	mcVersion, err := resolveLatestReleaseVersion()
+	if err != nil {
+		t.Fatalf("resolveLatestReleaseVersion: %v", err)
+	}
+	if mcVersion == "" {
+		t.Fatalf("empty resolved version")
+	}
+	t.Logf("resolved latest release: %s", mcVersion)
+
+	vd, err := resolveVersionDetail(mcVersion)
 	if err != nil {
 		t.Fatalf("resolveVersionDetail: %v", err)
 	}
@@ -19,7 +28,7 @@ func TestResolveAndBuildCommand(t *testing.T) {
 	}
 	t.Logf("vanilla mainClass=%s libs=%d", vd.MainClass, len(vd.Libraries))
 
-	fp, err := resolveFabricProfile()
+	fp, err := resolveFabricProfile(mcVersion)
 	if err != nil {
 		t.Fatalf("resolveFabricProfile: %v", err)
 	}
@@ -46,7 +55,7 @@ func TestResolveAndBuildCommand(t *testing.T) {
 		}
 	}
 
-	clientJar, err := ensureClientJar(vd)
+	clientJar, err := ensureClientJar(vd, mcVersion)
 	if err != nil {
 		t.Fatalf("ensureClientJar: %v", err)
 	}
@@ -89,8 +98,14 @@ func TestResolveAndBuildCommand(t *testing.T) {
 	if !strings.Contains(joined, "KnotClient") {
 		t.Fatalf("mainClass (fabric KnotClient) missing from args: %s", joined[:min(500, len(joined))])
 	}
-	if !strings.Contains(joined, "audestyt.gamehost.kr:1035") {
-		t.Fatalf("quickPlayMultiplayer target missing from args")
+	// audestyt.gamehost.kr 는 A 레코드가 없고 SRV 로만 실제 주소(host.gamehost.kr:1035)를
+	// 알려주는 서버라서, 최종 인자에는 SRV 로 풀린 주소가 들어가야 한다 (원본 그대로면
+	// "Unknown Host" 로 또 깨진다).
+	if !strings.Contains(joined, "host.gamehost.kr:1035") {
+		t.Fatalf("resolved (SRV) quickPlayMultiplayer target missing from args: %s", joined)
+	}
+	if strings.Contains(joined, "audestyt.gamehost.kr:1035") {
+		t.Fatalf("unresolved raw hostname leaked into args instead of SRV target: %s", joined)
 	}
 	if strings.Contains(joined, "${") {
 		t.Fatalf("unsubstituted template variable left in args: %s", joined)
