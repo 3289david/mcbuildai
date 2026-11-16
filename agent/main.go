@@ -505,28 +505,48 @@ func psSendKey(key string) {
 	exec.Command("powershell", "-NoProfile", "-Command", ps).Run()
 }
 
+var launchMu sync.Mutex
+var launchInFlight bool
+
 func handleLaunch() map[string]any {
-	account = refreshAccountIfNeeded(account)
-	logPath := filepath.Join(exeDir, "mc_launch.log")
-	logFile, err := os.Create(logPath)
-	if err != nil {
-		return map[string]any{"ok": false, "error": err.Error()}
+	launchMu.Lock()
+	if launchInFlight {
+		launchMu.Unlock()
+		// 이전 launch 가 아직 다운로드/실행 중인데 서버 쪽이 ack 를 못 받아서(타임아웃)
+		// 또 launch 를 보낸 경우 - 이미 하나 돌고 있으니 중복으로 또 받지 않는다.
+		return map[string]any{"ok": true, "note": "이미 실행 처리 중"}
 	}
-	cmd, err := buildMinecraftCommand(javaPath, account, cfg.JoinServer, logFile)
-	if err != nil {
-		logFile.Close()
-		return map[string]any{"ok": false, "error": err.Error()}
-	}
-	if err := cmd.Start(); err != nil {
-		logFile.Close()
-		return map[string]any{"ok": false, "error": err.Error()}
-	}
-	launchProc = cmd.Process
+	launchInFlight = true
+	launchMu.Unlock()
+
+	// 버전/라이브러리/에셋 다운로드는 처음 한 번은 수 분 걸릴 수 있어서, 그걸 다 끝내고
+	// ack 하면 서버 쪽 대기 시간(30초)을 넘겨버려 타임아웃 -> 중복 재시도로 이어졌다.
+	// 그래서 명령을 "받았다"는 것만 바로 ack 하고, 실제 준비+실행은 백그라운드에서 한다.
 	go func() {
-		cmd.Wait() // 좀비 프로세스 방지용 (출력은 이미 파일로 가고 있어서 결과는 안 봄)
-		logFile.Close()
-	}()
-	go func() {
+		defer func() { launchMu.Lock(); launchInFlight = false; launchMu.Unlock() }()
+		account = refreshAccountIfNeeded(account)
+		logPath := filepath.Join(exeDir, "mc_launch.log")
+		logFile, err := os.Create(logPath)
+		if err != nil {
+			say(">>> 실행 준비 실패:", err)
+			return
+		}
+		cmd, err := buildMinecraftCommand(javaPath, account, cfg.JoinServer, logFile)
+		if err != nil {
+			say(">>> 실행 준비 실패:", err)
+			logFile.Close()
+			return
+		}
+		if err := cmd.Start(); err != nil {
+			say(">>> 실행 시작 실패:", err)
+			logFile.Close()
+			return
+		}
+		launchProc = cmd.Process
+		go func() {
+			cmd.Wait() // 좀비 프로세스 방지용 (출력은 이미 파일로 가고 있어서 결과는 안 봄)
+			logFile.Close()
+		}()
 		var lastLen int
 		for elapsed := 10; elapsed <= 90; elapsed += 20 {
 			time.Sleep(20 * time.Second)
